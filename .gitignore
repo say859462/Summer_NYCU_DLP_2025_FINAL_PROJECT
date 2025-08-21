@@ -1,0 +1,6 @@
+*.pdf
+*.zip
+*.pth
+/SPG
+/CS
+*.txt
