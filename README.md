@@ -79,7 +79,7 @@ python train_Embed.py --dbDir data_embed_pt --outDir result --status train
 使用第一階段產生的權重來訓練第二階段的分割 Transformer。
 
 ```bash
-python train_Segformer.py --dbDir data_former_pt --outDir result --status train --embed_ckpt path/to/your/embedding_model.pth
+python train_Segformer.py --dbDir data_former_pt --outDir result --status train --embed_ckpt path/to/your/embedding_model.pth 
 ```
 
 - `--embed_ckpt`: **(重要)** 請將此參數指向您在步驟 3 中儲存的最佳模型權重檔案的路徑（例如 `result/_2025.../checkpoints/model_step_150000.pth`）。

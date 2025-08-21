@@ -331,7 +331,7 @@ if __name__ == "__main__":
         "--ckpt",
         help="checkpoint path",
         type=str,
-        default="result\_20250820_152634\checkpoints\model_step_145000.pth",
+        default="Embedding_Network_Model_Weight.pth",
     )
     parser.add_argument("--cnt", help="continue training flag", action="store_true")
     parser.add_argument("--rootFt", help="root feature size", type=int, default=32)

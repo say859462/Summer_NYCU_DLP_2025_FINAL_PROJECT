@@ -5,3 +5,6 @@
 /CS
 *.txt
 *.pt
+*.pyc
+/result_segformer
+/result

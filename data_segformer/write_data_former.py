@@ -12,7 +12,7 @@ from scipy.ndimage import distance_transform_edt
 input_file_path = r"SPG\\Perceptual Grouping\\airplane.ndjson"
 
 # 輸出資料夾
-output_dir = 'data_former_pt_paper_version_single_file'
+output_dir = 'data_former_pt'
 os.makedirs(output_dir, exist_ok=True)
 train_dir = os.path.join(output_dir, 'train')
 test_dir = os.path.join(output_dir, 'test')
