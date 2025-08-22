@@ -21,7 +21,7 @@ from network import GpTransformer, AutoencoderEmbed
 
 # ====== 參數解析  ======
 parser = argparse.ArgumentParser(
-    description="訓練 Sketch Semantic Segmentation Transformer 模型 (PyTorch, 原版風格)"
+    description="訓練 Sketch Semantic Segmentation Transformer 模型"
 )
 parser.add_argument(
     "--status",
@@ -53,22 +53,22 @@ parser.add_argument(
 )
 parser.add_argument("--cnt", help="是否從 ckpt 繼續訓練", action="store_true")
 parser.add_argument("--maxIter", help="最大訓練步數", type=int, default=1500000)
-# 與num_of_group類似 有可能會需要調整 batch_size 但>8可能就過度占用GPU記憶體導致訓練速度變慢 作者的GPU有24GB 可以開到32
-# 修改程式碼使用累積梯度 達到相同效果
-parser.add_argument("--batchSize", help="批次大小", type=int, default=8)
-
+parser.add_argument("--batchSize", help="批次大小 (實際)", type=int, default=8)
+parser.add_argument(
+    "--accum_steps",
+    help="梯度累積步數，等效 batch size = batchSize * accum_steps",
+    type=int,
+    default=4,
+)
 parser.add_argument("--lr", help="學習率", type=float, default=1e-4)
 parser.add_argument("--d_model", help="模型的特徵維度", type=int, default=256)
-parser.add_argument("--num_layers", help="Transformer 層數", type=int, default=2)
+parser.add_argument("--num_layers", help="Transformer 層數", type=int, default=4)
 parser.add_argument("--d_ff", help="前饋網路的中間層維度", type=int, default=2048)
-parser.add_argument("--num_heads", help="多頭注意力機制的頭數", type=int, default=2)
+parser.add_argument("--num_heads", help="多頭注意力機制的頭數", type=int, default=4)
 parser.add_argument("--drop_rate", help="Dropout 比率", type=float, default=0.4)
-
-# num_of_group 會需要針對不同類別的sketch去做修改 EX: airplane只有4種label
 parser.add_argument(
     "--num_of_group", help="資料集中的最大群組數量", type=int, default=4
 )
-
 parser.add_argument(
     "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=100
 )
@@ -152,7 +152,7 @@ def cacc(pred_sigmoid, gt_label):
 
 
 def group_images(images, labels):
-    images = images.permute(2, 0, 1)  # [S, H, W]
+    images = images.permute(2, 0, 1)
     grouped_images = []
     num_groups = labels.shape[0]
     for i in range(num_groups):
@@ -167,7 +167,6 @@ def group_images(images, labels):
 
 
 def cook_raw(batch_data):
-    # 【對應原版】隱含地使用全域變數 en_modelAESSG, de_modelAESSG, device
     input_raw, glabel_raw, nb_strokes, nb_gps = batch_data
     input_raw, glabel_raw = input_raw.to(device), glabel_raw.to(device)
     batch_size = input_raw.shape[0]
@@ -180,7 +179,6 @@ def cook_raw(batch_data):
         stroke_embeds = en_modelAESSG.encode(single_input_strokes)
         input_embeddings.append(stroke_embeds)
         grouped_imgs = group_images(input_raw[i, :, :, : nb_strokes[i]], single_labels)
-        # 【對應原版】使用 de_modelAESSG 進行部件編碼 (儘管兩者權重相同)
         group_embeds = de_modelAESSG.encode(grouped_imgs.unsqueeze(1))
         start_token = torch.full((1, group_embeds.shape[1]), -1.0, device=device)
         target_embeds_with_start = torch.cat([start_token, group_embeds], dim=0)
@@ -195,13 +193,8 @@ def cook_raw(batch_data):
 
 
 def generate_grouped_image(stroke_images, group_labels):
-    # stroke_images: [H, W, S], group_labels: [G, S]
-    # 【對應原版】用於視覺化的顏色標記函式
     num_groups = group_labels.shape[0]
-    canvas = torch.ones(
-        stroke_images.shape[0], stroke_images.shape[1], 3, device=device
-    )
-    # 定義一些鮮豔的顏色 (BGR格式 for OpenCV)
+    canvas = torch.ones(stroke_images.shape[0], stroke_images.shape[1], 3)
     colors = (
         torch.tensor(
             [
@@ -215,39 +208,20 @@ def generate_grouped_image(stroke_images, group_labels):
                 [128, 0, 255],
             ],
             dtype=torch.float32,
-            device=device,
         )
         / 255.0
     )
-
+    stroke_images, group_labels = stroke_images.cpu(), group_labels.cpu()
     for i in range(num_groups):
         color = colors[i % len(colors)]
         group_img = group_images(stroke_images, group_labels[i : i + 1, :])
-        # 將白色背景(1)變為透明(0)，筆劃(0)變為不透明(1)
         mask = (1.0 - group_img).unsqueeze(-1)
         colored_layer = color.view(1, 1, 3) * mask
-        canvas = canvas * (1.0 - mask) + colored_layer  # 疊加顏色
-    return (canvas * 255).cpu().numpy().astype(np.uint8)
+        canvas = canvas * (1.0 - mask) + colored_layer
+    return (canvas * 255).numpy().astype(np.uint8)
 
 
 # ====== 訓練與測試流程 ======
-def train_step(batch_data):
-    transformer.train()
-    inp_embed, tar_embed, labels = cook_raw(batch_data)
-    tar_for_input = tar_embed[:, :-1, :]
-    enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
-    optimizer.zero_grad()
-    predictions, _ = transformer(
-        inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
-    )
-    loss, acc = loss_fn(labels, predictions)
-    sacc_val = sacc(torch.sigmoid(predictions), labels)
-    cacc_val = cacc(torch.sigmoid(predictions), labels)
-    loss.backward()
-    optimizer.step()
-    return loss, acc, sacc_val, cacc_val
-
-
 def test_autoregre_step(batch_data):
     transformer.eval()
     with torch.no_grad():
@@ -284,7 +258,23 @@ def train_net():
     logger.info("--- 開始訓練 ---")
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     step = hyper_params.get("start_step", 0)
+    accumulation_steps = hyper_params.get("accum_steps", 1)
+    
+    # === 新增：初始化最佳分數追蹤變數 ===
+    best_sacc = 0.0
+    best_cacc = 0.0
+    best_score_sum = 0.0
+    # =================================
+
+    if accumulation_steps > 1:
+        logger.info(f"啟用梯度累積，步數為: {accumulation_steps}")
+        effective_batch_size = hyper_params["batchSize"] * accumulation_steps
+        logger.info(
+            f"實際批次大小: {hyper_params['batchSize']}, 等效批次大小: {effective_batch_size}"
+        )
+
     train_iter = iter(train_loader)
+    optimizer.zero_grad()
 
     while step < hyper_params["maxIter"]:
         try:
@@ -293,23 +283,40 @@ def train_net():
             train_iter = iter(train_loader)
             batch_data = next(train_iter)
 
-        loss, acc, sacc_val, cacc_val = train_step(batch_data)
+        transformer.train()
+        inp_embed, tar_embed, labels = cook_raw(batch_data)
+        tar_for_input = tar_embed[:, :-1, :]
+        enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
+
+        predictions, _ = transformer(
+            inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
+        )
+        loss, acc = loss_fn(labels, predictions)
+
+        loss = loss / accumulation_steps
+        loss.backward()
+
+        if (step + 1) % accumulation_steps == 0:
+            optimizer.step()
+            optimizer.zero_grad()
 
         if step % hyper_params["dispLossStep"] == 0:
+            sacc_val = sacc(torch.sigmoid(predictions), labels)
+            cacc_val = cacc(torch.sigmoid(predictions), labels)
             logger.info(
-                f"步驟 [{step}/{hyper_params['maxIter']}], 損失: {loss.item():.4f}, Acc: {acc.item():.4f}, SAcc: {sacc_val.item():.4f}, CAcc: {cacc_val:.4f}"
+                f"步驟 [{step}/{hyper_params['maxIter']}], 損失: {loss.item() * accumulation_steps:.4f}, Acc: {acc.item():.4f}, SAcc: {sacc_val.item():.4f}, CAcc: {cacc_val:.4f}"
             )
-            writer.add_scalar("Loss/train", loss.item(), step)
+            writer.add_scalar("Loss/train", loss.item() * accumulation_steps, step)
             writer.add_scalar("SAcc/train", sacc_val.item(), step)
             writer.add_scalar("CAcc/train", cacc_val, step)
 
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
             test_iter = iter(test_loader)
-            while True:  # 【對應原版】使用 while True 迴圈進行驗證
+            while True:
                 try:
-                    batch_data = next(test_iter)
-                    loss_v, _, sacc_v, cacc_v, _ = test_autoregre_step(batch_data)
+                    batch_data_val = next(test_iter)
+                    loss_v, _, sacc_v, cacc_v, _ = test_autoregre_step(batch_data_val)
                     val_loss += loss_v.item()
                     val_sacc += sacc_v.item()
                     val_cacc += cacc_v
@@ -328,6 +335,30 @@ def train_net():
             writer.add_scalar("SAcc/validation", avg_sacc, step)
             writer.add_scalar("CAcc/validation", avg_cacc, step)
 
+            # === 檢查是否為最佳模型並儲存 ===
+            current_score_sum = avg_sacc + avg_cacc
+            if current_score_sum > best_score_sum:
+                best_score_sum = current_score_sum
+                best_sacc = avg_sacc
+                best_cacc = avg_cacc
+                
+                best_model_path = os.path.join(
+                    output_folder, "checkpoints", "best_model.pth"
+                )
+                os.makedirs(os.path.dirname(best_model_path), exist_ok=True)
+                torch.save(
+                    {
+                        "step": step,
+                        "model_state_dict": transformer.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "sacc": best_sacc,
+                        "cacc": best_cacc,
+                    },
+                    best_model_path,
+                )
+                logger.info(f"*** 新的最佳模型已儲存至 {best_model_path}！ SAcc: {best_sacc:.4f}, CAcc: {best_cacc:.4f} ***")
+            # =====================================
+
             if step % hyper_params["saveModelStep"] == 0:
                 ckpt_path = os.path.join(
                     output_folder, "checkpoints", f"model_step_{step}.pth"
@@ -341,7 +372,7 @@ def train_net():
                     },
                     ckpt_path,
                 )
-                logger.info(f"模型已儲存至: {ckpt_path}")
+                logger.info(f"模型已按步數儲存至: {ckpt_path}")
         step += 1
     writer.close()
     logger.info("--- 訓練完成 ---")
@@ -351,11 +382,10 @@ def test_net():
     logger.info("--- 開始測試 ---")
     img_folder = os.path.join(output_folder, "imgs")
     os.makedirs(img_folder, exist_ok=True)
-
     val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
     test_iter = iter(test_loader)
     test_itr = 1
-    while True:  # 【對應原版】使用 while True 迴圈進行測試
+    while True:
         try:
             batch_data = next(test_iter)
             loss_v, _, sacc_v, cacc_v, final_predictions = test_autoregre_step(
@@ -365,28 +395,23 @@ def test_net():
             val_sacc += sacc_v.item()
             val_cacc += cacc_v
             count += 1
-
             logger.info(
                 f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.4f}, CAcc: {cacc_v:.4f}"
             )
-
-            # 【對應原版】儲存視覺化結果
             input_raw, glabel_raw, nb_strokes, _ = batch_data
             gt_vis_img = generate_grouped_image(
-                input_raw[0, :, :, : nb_strokes[0]].cpu(), glabel_raw[0].cpu()
+                input_raw[0, :, :, : nb_strokes[0]], glabel_raw[0]
             )
             pred_vis_img = generate_grouped_image(
-                input_raw[0, :, :, : nb_strokes[0]].cpu(),
-                torch.round(torch.sigmoid(final_predictions[0])).cpu(),
+                input_raw[0, :, :, : nb_strokes[0]],
+                torch.round(torch.sigmoid(final_predictions[0])),
             )
-
             cv2.imwrite(
                 os.path.join(img_folder, f"{test_itr}_g_label.jpeg"), gt_vis_img
             )
             cv2.imwrite(
                 os.path.join(img_folder, f"{test_itr}_g_pred.jpeg"), pred_vis_img
             )
-
             test_itr += 1
         except StopIteration:
             break
@@ -423,7 +448,6 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用設備: {device}")
 
-    # --- 全域變數定義 ---
     en_modelAESSG = AutoencoderEmbed(
         code_size=hyper_params["d_model"], x_dim=256, y_dim=256, root_feature=32
     ).to(device)
@@ -443,8 +467,8 @@ if __name__ == "__main__":
         transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
     )
 
-    # --- 載入資料 ---
     logger.info("正在準備資料載入器...")
+    train_loader = None
     if hyper_params["status"] == "train":
         train_loader = DataLoader(
             GPRegDataset(
@@ -454,6 +478,7 @@ if __name__ == "__main__":
             shuffle=True,
             collate_fn=gpreg_collate_fn,
         )
+
     test_loader = DataLoader(
         GPRegDataset(
             data_dir=hyper_params["dbDir"], raw_size=[256, 256], prefix="test"
@@ -463,10 +488,8 @@ if __name__ == "__main__":
         collate_fn=gpreg_collate_fn,
     )
 
-    # --- 載入 Checkpoints ---
     logger.info(f"正在從 {hyper_params['embed_ckpt']} 載入預訓練的 Embedding 模型...")
     try:
-        # 【對應原版】分別載入 en_model 和 de_model
         checkpoint_embed = torch.load(hyper_params["embed_ckpt"], map_location=device)
         en_modelAESSG.load_state_dict(checkpoint_embed["model_state_dict"])
         de_modelAESSG.load_state_dict(checkpoint_embed["model_state_dict"])
@@ -486,8 +509,10 @@ if __name__ == "__main__":
             hyper_params["start_step"] = checkpoint.get("step", 0)
             logger.info(f"成功恢復訓練，從步驟 {hyper_params['start_step']} 開始。")
 
-    # --- 執行 ---
     if hyper_params["status"] == "train":
+        if not train_loader:
+            logger.error("訓練模式下，train 資料夾不可為空。")
+            exit()
         train_net()
     elif hyper_params["status"] == "test":
         test_net()
