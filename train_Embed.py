@@ -36,7 +36,7 @@ hyper_params = {
     "codeSize": 256,
     "imgSize": 256,
     "alpha": 0.8,
-    "lr": 1e-4,  # PyTorch 版本額外需要的學習率參數
+    "lr": 1e-3,  # PyTorch 版本額外需要的學習率參數
 }
 
 

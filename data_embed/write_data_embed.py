@@ -98,7 +98,7 @@ for inx, line_list in enumerate(merged_data):
     grouped_lines = group_lines_by_category(lines, group_id)
 
     for line_for_a_group in grouped_lines:
-        if len(line_for_a_group) < 1:
+        if len(line_for_a_group) == 1:
             continue
 
         img = Image.new("1", (img_size, img_size), 0)
@@ -121,7 +121,8 @@ for inx, line_list in enumerate(merged_data):
         inverted_arr = 1 - arr_with_pad
         euclidean_distance = distance_transform_edt(inverted_arr)
         k = 0.001
-        distance_field = 1.0 / (1.0 + k * euclidean_distance)
+        with np.errstate(over="ignore"):
+            distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
 
         all_data_pairs.append((arr_with_pad, distance_field))
 
