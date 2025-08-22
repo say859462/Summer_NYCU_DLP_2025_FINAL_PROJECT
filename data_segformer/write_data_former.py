@@ -137,7 +137,9 @@ def process_and_write_data(dataset, subset_path, subset_name):
             # --- 計算距離場 ---
             inverted_arr = 1.0 - arr_with_pad
             euclidean_distance = distance_transform_edt(inverted_arr)
-            distance_field = 1.0 / (1.0 + k_for_distance_field * euclidean_distance)
+            k = 0.01
+            with np.errstate(over="ignore"):
+                distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
             stroke_distance_fields.append(distance_field)
 
         img_raw_np = np.stack(stroke_images, axis=-1)
