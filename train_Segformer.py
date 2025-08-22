@@ -9,6 +9,7 @@ import time
 import datetime
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -98,20 +99,55 @@ def create_masks(inp, tar):
     return enc_padding_mask, combined_mask, dec_padding_mask
 
 
-def loss_fn(real, pred):
-    criterion = nn.BCEWithLogitsLoss(reduction="none")
+# =============================================================================
+# MODIFIED: 替換為 Focal Loss
+# =============================================================================
+def loss_fn(real, pred, gamma=2.0):
+    """
+    計算 Focal Loss (參照論文 Eq. 6)
+    Args:
+        real (torch.Tensor): 真實標籤 (B, G, S), 包含 -1 作為 padding
+        pred (torch.Tensor): 模型的 logits 輸出 (B, G, S)
+        gamma (float): Focal Loss 的聚焦參數, 論文設為 2.0
+    Returns:
+        tuple: (loss_val, acc_val)
+    """
+    # 創建一個 mask 來忽略 padding 的部分 (-1.0)
     mask = (real != -1.0).float()
-    loss = criterion(pred, real.float()) * mask
+
+    # BCEWithLogitsLoss 計算 log(p) 和 log(1-p)
+    bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
+
+    p = torch.sigmoid(pred)
+    # pt 是模型對於正確類別的預測概率
+    pt = torch.where(real == 1.0, p, 1 - p)
+
+    # 論文中的 (1-pt)^γ 項
+    modulating_factor = (1.0 - pt).pow(gamma)
+
+    # 計算 Focal Loss
+    loss = modulating_factor * bce_loss
+
+    # 應用 mask，只計算非 padding 部分的 loss
+    loss = loss * mask
+
     nb_elem = torch.sum(mask)
     if nb_elem == 0:
         return torch.tensor(0.0, device=pred.device), torch.tensor(
             1.0, device=pred.device
         )
+
     loss_val = torch.sum(loss) / nb_elem
-    pred_sigmoid_masked = torch.round(torch.sigmoid(pred)) * mask
+
+    # 準確率計算保持不變
+    pred_sigmoid_masked = torch.round(p) * mask
     real_masked = real * mask
     acc_val = 1.0 - (torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem)
+
     return loss_val, acc_val
+
+
+# =============================================================================
 
 
 def sacc(pred_sigmoid, gt_label):
@@ -248,7 +284,7 @@ def test_autoregre_step(batch_data):
             new_token_embed = de_modelAESSG.encode(grouped_img.unsqueeze(1))
             gp_token = torch.cat([gp_token, new_token_embed.unsqueeze(1)], dim=1)
         final_predictions = torch.cat(all_predictions, dim=1)
-        loss, acc = loss_fn(glabel_raw, final_predictions)
+        loss, acc = loss_fn(glabel_raw, final_predictions, gamma=2.0)  # 使用 Focal loss
         sacc_val = sacc(torch.sigmoid(final_predictions), glabel_raw)
         cacc_val = cacc(torch.sigmoid(final_predictions), glabel_raw)
     return loss, acc, sacc_val, cacc_val, final_predictions
@@ -259,12 +295,10 @@ def train_net():
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     step = hyper_params.get("start_step", 0)
     accumulation_steps = hyper_params.get("accum_steps", 1)
-    
-    # === 新增：初始化最佳分數追蹤變數 ===
+
     best_sacc = 0.0
     best_cacc = 0.0
     best_score_sum = 0.0
-    # =================================
 
     if accumulation_steps > 1:
         logger.info(f"啟用梯度累積，步數為: {accumulation_steps}")
@@ -291,7 +325,12 @@ def train_net():
         predictions, _ = transformer(
             inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
         )
-        loss, acc = loss_fn(labels, predictions)
+
+        # =====================================================================
+        # MODIFIED: 使用 Focal Loss (gamma=2.0)
+        # =====================================================================
+        loss, acc = loss_fn(labels, predictions, gamma=2.0)
+        # =====================================================================
 
         loss = loss / accumulation_steps
         loss.backward()
@@ -304,7 +343,7 @@ def train_net():
             sacc_val = sacc(torch.sigmoid(predictions), labels)
             cacc_val = cacc(torch.sigmoid(predictions), labels)
             logger.info(
-                f"步驟 [{step}/{hyper_params['maxIter']}], 損失: {loss.item() * accumulation_steps:.4f}, Acc: {acc.item():.4f}, SAcc: {sacc_val.item():.4f}, CAcc: {cacc_val:.4f}"
+                f"步驟 [{step}/{hyper_params['maxIter']}], 損失: {loss.item() * accumulation_steps:.6f}, Acc: {acc.item():.6f}, SAcc: {sacc_val.item():.6f}, CAcc: {cacc_val:.6f}"
             )
             writer.add_scalar("Loss/train", loss.item() * accumulation_steps, step)
             writer.add_scalar("SAcc/train", sacc_val.item(), step)
@@ -329,19 +368,18 @@ def train_net():
                 val_cacc / count,
             )
             logger.info(
-                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.4f}, 平均 SAcc: {avg_sacc:.4f}, 平均 CAcc: {avg_cacc:.4f}"
+                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
             )
             writer.add_scalar("Loss/validation", avg_loss, step)
             writer.add_scalar("SAcc/validation", avg_sacc, step)
             writer.add_scalar("CAcc/validation", avg_cacc, step)
 
-            # === 檢查是否為最佳模型並儲存 ===
             current_score_sum = avg_sacc + avg_cacc
             if current_score_sum > best_score_sum:
                 best_score_sum = current_score_sum
                 best_sacc = avg_sacc
                 best_cacc = avg_cacc
-                
+
                 best_model_path = os.path.join(
                     output_folder, "checkpoints", "best_model.pth"
                 )
@@ -356,10 +394,11 @@ def train_net():
                     },
                     best_model_path,
                 )
-                logger.info(f"*** 新的最佳模型已儲存至 {best_model_path}！ SAcc: {best_sacc:.4f}, CAcc: {best_cacc:.4f} ***")
-            # =====================================
+                logger.info(
+                    f"*** 新的最佳模型已儲存至 {best_model_path}！ SAcc: {best_sacc:.6f}, CAcc: {best_cacc:.6f} ***"
+                )
 
-            if step % hyper_params["saveModelStep"] == 0:
+            if step % hyper_params["saveModelStep"] == 0 and step > 0:
                 ckpt_path = os.path.join(
                     output_folder, "checkpoints", f"model_step_{step}.pth"
                 )
@@ -396,7 +435,7 @@ def test_net():
             val_cacc += cacc_v
             count += 1
             logger.info(
-                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.4f}, CAcc: {cacc_v:.4f}"
+                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.6f}, CAcc: {cacc_v:.6f}"
             )
             input_raw, glabel_raw, nb_strokes, _ = batch_data
             gt_vis_img = generate_grouped_image(
@@ -417,7 +456,7 @@ def test_net():
             break
     avg_loss, avg_sacc, avg_cacc = val_loss / count, val_sacc / count, val_cacc / count
     logger.info(
-        f"測試完成 - 平均損失: {avg_loss:.4f}, 平均 SAcc: {avg_sacc:.4f}, 平均 CAcc: {avg_cacc:.4f}"
+        f"測試完成 - 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
     )
 
 

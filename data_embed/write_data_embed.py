@@ -120,7 +120,7 @@ for inx, line_list in enumerate(merged_data):
 
         inverted_arr = 1 - arr_with_pad
         euclidean_distance = distance_transform_edt(inverted_arr)
-        k = 0.01
+        k = 0.001
         with np.errstate(over="ignore"):
             distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
 
