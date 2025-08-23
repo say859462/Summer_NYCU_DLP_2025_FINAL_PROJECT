@@ -158,7 +158,7 @@ def process_and_write_data(dataset, subset_path, subset_name):
         data_to_save = {
             "img_raw": torch.from_numpy(img_raw_np).float(),
             "glabel_raw": torch.from_numpy(glabel).long(),
-            # "category": category_name,  # 你的改進，可以保留
+            # "category": category_name,  
         }
 
         torch.save(data_to_save, os.path.join(subset_path, f"{idx}.pt"))

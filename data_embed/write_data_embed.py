@@ -92,7 +92,10 @@ def process_one(line_list):
             geo_dist = GeodisTK.geodesic2d_raster_scan(
                 arr_pad.astype(np.float32), mask, 0, 5
             )
-            sd = 1 / (1 + 0.01 * np.exp(geo_dist))
+            # k: 0.01 source code , k: 0.001 paper indicated
+            # sd = 1 / (1 + 0.01 * np.exp(geo_dist))
+            sd = 1 / (1 + 0.001 * np.exp(geo_dist))
+
             sd[np.isinf(sd)] = 0.0
             sd[np.isnan(sd)] = 0.0
 

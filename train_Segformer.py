@@ -98,10 +98,7 @@ def create_masks(inp, tar):
     combined_mask = tar_padding_mask | look_ahead_mask
     return enc_padding_mask, combined_mask, dec_padding_mask
 
-
-# =============================================================================
-# MODIFIED: 替換為 Focal Loss
-# =============================================================================
+# Source code loss function
 def loss_fn(real, pred):
     mask = (real != -1.0).float()
     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
@@ -117,6 +114,51 @@ def loss_fn(real, pred):
 
     return loss_val, acc_val
 
+
+# def loss_fn(real, pred, gamma=2.0):
+#     """
+#     計算 Focal Loss。
+#     根據論文 Eq. 6，gamma 值預設為 2.0。
+#     """
+#     # 步驟 1: 建立遮罩 (mask)，忽略填充值 (-1.0)，這部分與原始程式碼相同
+#     mask = (real != -1.0).float()
+
+#     # 步驟 2: 計算標準的 BCE Loss (但不進行 reduction)
+#     # F.binary_cross_entropy_with_logits 包含了 sigmoid 操作，更穩定
+#     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
+
+#     # 步驟 3: 計算 Focal Loss 的調變因子 (modulating factor)
+#     # 首先取得預測機率 p
+#     p = torch.sigmoid(pred)
+#     # 根據真實標籤計算 p_t
+#     p_t = p * real + (1 - p) * (1 - real)
+#     # 調變因子為 (1 - p_t)^gamma
+#     modulating_factor = (1.0 - p_t).pow(gamma)
+
+#     # 步驟 4: 計算最終的 Focal Loss
+#     # 將 BCE Loss 與調變因子相乘
+#     focal_loss = modulating_factor * bce_loss
+
+#     # 步驟 5: 應用遮罩並計算平均損失
+#     masked_loss = focal_loss * mask
+#     nb_elem = torch.sum(mask)
+#     if nb_elem == 0: # 避免除以零
+#         loss_val = torch.tensor(0.0).to(pred.device)
+#     else:
+#         loss_val = torch.sum(masked_loss) / nb_elem
+
+#     # --- 準確率計算部分保持不變 ---
+#     with torch.no_grad(): # 準確率計算不應影響梯度
+#         pred_sigmoid = torch.sigmoid(pred)
+#         pred_sigmoid_masked = torch.round(pred_sigmoid) * mask
+#         real_masked = real * mask
+
+#         if nb_elem == 0:
+#             acc_val = torch.tensor(1.0).to(pred.device)
+#         else:
+#             acc_val = 1.0 - (torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem)
+
+#     return loss_val, acc_val
 
 # =============================================================================
 

@@ -7,6 +7,7 @@
 - **框架轉換**：所有模型架構、訓練迴圈和資料載入器都已從 TensorFlow/Keras 轉換為 PyTorch。
 - **依賴性簡化**：將距離場計算從 GeodisTK 函式庫替換為 `scipy`，大幅簡化了環境設定的複雜性。
 - **資料格式更新**：移除對 `tfrecord` 的依賴，改用 PyTorch 原生的 `.pt` 格式來儲存預處理後的資料，徹底解決了 TensorFlow 和相關套件的版本衝突問題。
+- **額外實作**：相較於 source code，paper 提到很多原本 code 沒有實作的細節，例如 loss function 的定義、DF k 值選擇、以及 data augmentation，在這裡都將其實做出來，後續經由實驗選擇較好者。train_segformer.py增加focal loss，scheduled sampling
 
 ## 專案結構
 
@@ -32,7 +33,7 @@
 您可以使用 `pip` 來安裝所有必要的 Python 套件：
 
 ```bash
-pip install torch torchvision numpy == 1.26.4 scipy Pillow ujson opencv-python==4.8.1.78
+pip install torch torchvision numpy == 1.26.4  Pillow ujson opencv-python==4.8.1.78  albumentations
 ```
 
 > **註**：建議安裝 NumPy 1.x 版本 (`<2`) 以確保與某些相依套件的最佳相容性。
@@ -79,7 +80,7 @@ python train_Embed.py --dbDir data_embed_pt --outDir result --status train
 使用第一階段產生的權重來訓練第二階段的分割 Transformer。
 
 ```bash
-python train_Segformer.py --dbDir data_former_pt --outDir result --status train --embed_ckpt path/to/your/embedding_model.pth 
+python train_Segformer.py --dbDir data_former_pt --outDir result --status train --embed_ckpt path/to/your/embedding_model.pth
 ```
 
 - `--embed_ckpt`: **(重要)** 請將此參數指向您在步驟 3 中儲存的最佳模型權重檔案的路徑（例如 `result/_2025.../checkpoints/model_step_150000.pth`）。

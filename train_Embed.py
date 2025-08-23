@@ -26,7 +26,7 @@ hyper_params = {
     "batchSize": 64,
     "dbDir": "data_embed_pt",
     "outDir": "result_embed",
-    "device": "0",  # 會在 main block 中被 torch 的 device 取代
+    "device": "0",
     "rootFt": 32,
     "dispLossStep": 200,
     "exeValStep": 5000,
@@ -37,28 +37,54 @@ hyper_params = {
     "status": "train",  # 預設狀態
     "codeSize": 256,
     "imgSize": 256,
-    "gamma": 0.8,
-    "lr": 1e-4,  # 論文指定的學習率
+    "lr": 1e-4,
 }
 
 
 # =============================================================================
-# 核心損失函數 (嚴格遵循論文)
+# 核心損失函數 統一傳入logits 針對不同loss function再去做預處理
 # =============================================================================
-# def loss_fn_for_train(recon_pred, labels, dist_pred, dist_labels, gamma):
+# def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, gamma=0.5):
 #     """計算訓練時的總損失 (參照論文 Eq. 2, 3, 4)"""
+#     # 對 logits 進行預處理
+#     recon_pred = torch.sigmoid(recon_logits)
+#     dist_pred = torch.sigmoid(dist_logits)
+
+#     # 計算損失
 #     recon_loss = nn.MSELoss()(recon_pred, labels)
 #     dist_loss = nn.MSELoss()(dist_pred, dist_labels)
+
 #     loss = recon_loss + gamma * dist_loss
 #     return loss, recon_loss, dist_loss
 
 
-def loss_fn_for_train(recon_pred, labels, dist_pred, dist_labels, alpha=0.8):
-    # Sigmoid 交叉熵損失 (類似 tf.nn.sigmoid_cross_entropy_with_logits)
-    cons_loss = nn.BCEWithLogitsLoss()(recon_pred, labels)
-    pre_loss = nn.MSELoss()(dist_pred, dist_labels)
-    loss = alpha * cons_loss + (1 - alpha) * pre_loss
-    return loss, cons_loss, pre_loss
+def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, alpha=0.8):
+
+    recon_loss = nn.BCEWithLogitsLoss()(recon_logits, labels)
+
+    # 2. 距離場損失 (pre_loss)
+    # 原始碼中的 dis_map 是已經 sigmoid 過的預測圖，所以這裡我們也對 logits 做 sigmoid
+    dist_pred = torch.sigmoid(dist_logits)
+    dist_loss = nn.MSELoss()(dist_pred, dist_labels)
+
+    # 3. 總損失 (loss)
+    # 按照原始碼的 alpha 加權方式
+    total_loss = alpha * recon_loss + (1 - alpha) * dist_loss
+
+    # --- 準確率計算 ---
+
+    # 4. 重建準確率 (train_cons_acc)
+    # tf.keras.metrics.binary_accuracy 的 PyTorch 實現
+    with torch.no_grad():  # 準確率計算不應影響梯度
+        recon_pred_binary = torch.sigmoid(recon_logits) > 0.5
+        labels_binary = labels > 0.5
+        recon_acc = (recon_pred_binary == labels_binary).float().mean()
+
+    # 5. 距離場 "準確率" (train_pre_acc)
+    # 原始碼直接使用 MSE 作為指標，我們也回傳 dist_loss 的值
+    dist_acc_mse = dist_loss
+
+    return total_loss, recon_loss, dist_loss
 
 
 def loss_fn_for_eval(recon_pred, labels):
@@ -88,11 +114,13 @@ def train_net(logger, output_folder, device):
             hyper_params["dbDir"],
             [hyper_params["imgSize"], hyper_params["imgSize"]],
             "train",
+            augment=True,
         )
         valid_dataset = AeDataset(
             hyper_params["dbDir"],
             [hyper_params["imgSize"], hyper_params["imgSize"]],
             "valid",
+            augment=False,
         )
         train_loader = DataLoader(
             train_dataset,
@@ -117,6 +145,16 @@ def train_net(logger, output_folder, device):
     ckpt_dir = os.path.join(output_folder, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
 
+    # 建立用於儲存驗證預覽圖的資料夾
+    preview_dir = os.path.join(output_folder, "validation_previews")
+    os.makedirs(preview_dir, exist_ok=True)
+
+    # 初始化最佳損失和準確率追蹤
+    best_val_loss = float("inf")
+    best_val_acc = 0.0
+    best_loss_step = 0
+    best_acc_step = 0
+
     start_step = 0
     if (
         hyper_params["cnt"]
@@ -128,7 +166,15 @@ def train_net(logger, output_folder, device):
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_step = checkpoint.get("step", 0)
+        # 恢復最佳指標（如果存在）
+        best_val_loss = checkpoint.get("best_val_loss", float("inf"))
+        best_val_acc = checkpoint.get("best_val_acc", 0.0)
+        best_loss_step = checkpoint.get("best_loss_step", 0)
+        best_acc_step = checkpoint.get("best_acc_step", 0)
+
         train_logger.info(f"成功載入權重，從步驟 {start_step} 繼續。")
+        train_logger.info(f"當前最佳損失: {best_val_loss:.6f} (步驟 {best_loss_step})")
+        train_logger.info(f"當前最佳準確率: {best_val_acc:.6f} (步驟 {best_acc_step})")
 
     step = start_step
     train_iter = iter(train_loader)
@@ -145,11 +191,11 @@ def train_net(logger, output_folder, device):
         dist_labels = dist_labels.to(device)
 
         recon_logits, dist_logits = model(inputs)
-        recon_pred = torch.sigmoid(recon_logits)
-        dist_pred = torch.sigmoid(dist_logits)
+        # recon_pred = torch.sigmoid(recon_logits)
+        # dist_pred = torch.sigmoid(dist_logits)
 
         loss, cons_loss, pre_loss = loss_fn_for_train(
-            recon_pred, inputs, dist_pred, dist_labels, hyper_params["gamma"]
+            recon_logits, inputs, dist_logits, dist_labels
         )
 
         optimizer.zero_grad()
@@ -171,17 +217,28 @@ def train_net(logger, output_folder, device):
             with torch.no_grad():
                 for i, (val_inputs, _) in enumerate(valid_loader):
                     val_inputs = val_inputs.to(device)
-                    val_recon_logits, _ = model(val_inputs)
-                    val_recon_pred = torch.sigmoid(val_recon_logits)
-                    val_loss, val_acc = loss_fn_for_eval(val_recon_pred, val_inputs)
+                    val_recon_logits, _ = model(val_inputs)  # <--- 獲取原始 logits
+
+                    # 將原始 logits 傳遞給評估函式
+                    val_loss, val_acc = loss_fn_for_eval(val_recon_logits, val_inputs)
+
                     total_val_loss += val_loss
                     total_val_acc += val_acc
                     if i == 0:
+                        # 視覺化時仍然需要 sigmoid
+
+                        val_recon_pred = torch.sigmoid(val_recon_logits)
                         grid = make_grid(
                             torch.cat([val_inputs[:8].cpu(), val_recon_pred[:8].cpu()]),
                             nrow=8,
                         )
                         writer.add_image("Validation/reconstruction", grid, step)
+
+                        # 儲存預覽圖到檔案
+                        preview_path = os.path.join(
+                            preview_dir, f"validation_step_{step}.png"
+                        )
+                        save_image(grid, preview_path)
 
             avg_val_loss = total_val_loss / len(valid_loader)
             avg_val_acc = total_val_acc / len(valid_loader)
@@ -191,6 +248,52 @@ def train_net(logger, output_folder, device):
                 f"--- 驗證步驟 {step} --- 平均損失: {avg_val_loss:.6f}, 平均準確率: {avg_val_acc:.6f}"
             )
 
+            is_best_loss = avg_val_loss < best_val_loss
+            is_best_acc = avg_val_acc > best_val_acc
+
+            if is_best_loss:
+                best_val_loss = avg_val_loss
+                best_loss_step = step
+                train_logger.info(f"新的最佳損失: {best_val_loss:.6f} (步驟 {step})")
+
+            if is_best_acc:
+                best_val_acc = avg_val_acc
+                best_acc_step = step
+                train_logger.info(f"新的最佳準確率: {best_val_acc:.6f} (步驟 {step})")
+
+            # 儲存最佳模型
+            if is_best_loss:
+                best_loss_path = os.path.join(ckpt_dir, "best_loss_model.pth")
+                torch.save(
+                    {
+                        "step": step,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "best_val_loss": best_val_loss,
+                        "best_val_acc": best_val_acc,
+                        "best_loss_step": best_loss_step,
+                        "best_acc_step": best_acc_step,
+                    },
+                    best_loss_path,
+                )
+                train_logger.info(f"最佳損失模型已儲存至: {best_loss_path}")
+
+            if is_best_acc:
+                best_acc_path = os.path.join(ckpt_dir, "best_acc_model.pth")
+                torch.save(
+                    {
+                        "step": step,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "best_val_loss": best_val_loss,
+                        "best_val_acc": best_val_acc,
+                        "best_loss_step": best_loss_step,
+                        "best_acc_step": best_acc_step,
+                    },
+                    best_acc_path,
+                )
+                train_logger.info(f"最佳準確率模型已儲存至: {best_acc_path}")
+
         if step > 0 and step % hyper_params["saveModelStep"] == 0:
             ckpt_path = os.path.join(ckpt_dir, f"model_step_{step}.pth")
             torch.save(
@@ -198,6 +301,10 @@ def train_net(logger, output_folder, device):
                     "step": step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "best_val_loss": best_val_loss,
+                    "best_val_acc": best_val_acc,
+                    "best_loss_step": best_loss_step,
+                    "best_acc_step": best_acc_step,
                 },
                 ckpt_path,
             )
@@ -518,7 +625,7 @@ if __name__ == "__main__":
         choices=["train", "test", "vis", "codeItp", "tripleItp", "white_image"],
     )
     parser.add_argument(
-        "--dbDir", help="database directory", type=str, default="data_embed_pt"
+        "--dbDir", help="database directory", type=str, default="data_embed_pt_k_001"
     )
     parser.add_argument("--outDir", help="output directory", type=str, default="result")
     args = parser.parse_args()
