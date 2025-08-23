@@ -37,7 +37,7 @@ hyper_params = {
     "status": "train",  # 預設狀態
     "codeSize": 256,
     "imgSize": 256,
-    "gamma": 0.5,  # 論文指定的 L_dis 權重
+    "gamma": 0.8,
     "lr": 1e-4,  # 論文指定的學習率
 }
 
@@ -45,22 +45,27 @@ hyper_params = {
 # =============================================================================
 # 核心損失函數 (嚴格遵循論文)
 # =============================================================================
-def loss_fn_for_train(recon_pred, labels, dist_pred, dist_labels, gamma):
-    """計算訓練時的總損失 (參照論文 Eq. 2, 3, 4)"""
-    recon_loss = nn.MSELoss()(recon_pred, labels)
-    dist_loss = nn.MSELoss()(dist_pred, dist_labels)
-    loss = recon_loss + gamma * dist_loss
-    return loss, recon_loss, dist_loss
+# def loss_fn_for_train(recon_pred, labels, dist_pred, dist_labels, gamma):
+#     """計算訓練時的總損失 (參照論文 Eq. 2, 3, 4)"""
+#     recon_loss = nn.MSELoss()(recon_pred, labels)
+#     dist_loss = nn.MSELoss()(dist_pred, dist_labels)
+#     loss = recon_loss + gamma * dist_loss
+#     return loss, recon_loss, dist_loss
+
+
+def loss_fn_for_train(recon_pred, labels, dist_pred, dist_labels, alpha=0.8):
+    # Sigmoid 交叉熵損失 (類似 tf.nn.sigmoid_cross_entropy_with_logits)
+    cons_loss = nn.BCEWithLogitsLoss()(recon_pred, labels)
+    pre_loss = nn.MSELoss()(dist_pred, dist_labels)
+    loss = alpha * cons_loss + (1 - alpha) * pre_loss
+    return loss, cons_loss, pre_loss
 
 
 def loss_fn_for_eval(recon_pred, labels):
-    """計算評估時的損失和準確率，同樣使用 MSE"""
-    loss = nn.MSELoss()(recon_pred, labels)
-    preds = (recon_pred > 0.5).float()
-    labels_byte = (labels > 0.5).byte()
-    correct = (preds.byte() == labels_byte).sum().item()
-    acc = correct / labels.numel()
-    return loss, acc
+    loss = nn.BCEWithLogitsLoss()(recon_pred, labels)
+    preds = torch.sigmoid(recon_pred) > 0.5
+    acc = (preds == (labels > 0.5)).float().mean().item()
+    return loss.item(), acc
 
 
 # =============================================================================
@@ -169,7 +174,7 @@ def train_net(logger, output_folder, device):
                     val_recon_logits, _ = model(val_inputs)
                     val_recon_pred = torch.sigmoid(val_recon_logits)
                     val_loss, val_acc = loss_fn_for_eval(val_recon_pred, val_inputs)
-                    total_val_loss += val_loss.item()
+                    total_val_loss += val_loss
                     total_val_acc += val_acc
                     if i == 0:
                         grid = make_grid(
@@ -306,7 +311,7 @@ def output_vis(logger, output_folder, device):
             inputs = inputs.to(device)
             recon_logits, _ = model(inputs)
             recon_imgs = torch.sigmoid(recon_logits)
-            
+
             save_image(inputs, os.path.join(img_folder, f"{i}_original.jpeg"))
             save_image(recon_imgs, os.path.join(img_folder, f"{i}_reconstructed.jpeg"))
             if (i + 1) % 100 == 0:
@@ -515,9 +520,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dbDir", help="database directory", type=str, default="data_embed_pt"
     )
-    parser.add_argument(
-        "--outDir", help="output directory", type=str, default="result"
-    )
+    parser.add_argument("--outDir", help="output directory", type=str, default="result")
     args = parser.parse_args()
 
     # 更新超參數

@@ -102,45 +102,16 @@ def create_masks(inp, tar):
 # =============================================================================
 # MODIFIED: 替換為 Focal Loss
 # =============================================================================
-def loss_fn(real, pred, gamma=2.0):
-    """
-    計算 Focal Loss (參照論文 Eq. 6)
-    Args:
-        real (torch.Tensor): 真實標籤 (B, G, S), 包含 -1 作為 padding
-        pred (torch.Tensor): 模型的 logits 輸出 (B, G, S)
-        gamma (float): Focal Loss 的聚焦參數, 論文設為 2.0
-    Returns:
-        tuple: (loss_val, acc_val)
-    """
-    # 創建一個 mask 來忽略 padding 的部分 (-1.0)
+def loss_fn(real, pred):
     mask = (real != -1.0).float()
-
-    # BCEWithLogitsLoss 計算 log(p) 和 log(1-p)
     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
-
-    p = torch.sigmoid(pred)
-    # pt 是模型對於正確類別的預測概率
-    pt = torch.where(real == 1.0, p, 1 - p)
-
-    # 論文中的 (1-pt)^γ 項
-    modulating_factor = (1.0 - pt).pow(gamma)
-
-    # 計算 Focal Loss
-    loss = modulating_factor * bce_loss
-
-    # 應用 mask，只計算非 padding 部分的 loss
-    loss = loss * mask
+    loss = bce_loss * mask
 
     nb_elem = torch.sum(mask)
-    if nb_elem == 0:
-        return torch.tensor(0.0, device=pred.device), torch.tensor(
-            1.0, device=pred.device
-        )
-
     loss_val = torch.sum(loss) / nb_elem
 
-    # 準確率計算保持不變
-    pred_sigmoid_masked = torch.round(p) * mask
+    pred_sigmoid = torch.sigmoid(pred)
+    pred_sigmoid_masked = torch.round(pred_sigmoid) * mask
     real_masked = real * mask
     acc_val = 1.0 - (torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem)
 
@@ -284,7 +255,7 @@ def test_autoregre_step(batch_data):
             new_token_embed = de_modelAESSG.encode(grouped_img.unsqueeze(1))
             gp_token = torch.cat([gp_token, new_token_embed.unsqueeze(1)], dim=1)
         final_predictions = torch.cat(all_predictions, dim=1)
-        loss, acc = loss_fn(glabel_raw, final_predictions, gamma=2.0)  # 使用 Focal loss
+        loss, acc = loss_fn(glabel_raw, final_predictions)
         sacc_val = sacc(torch.sigmoid(final_predictions), glabel_raw)
         cacc_val = cacc(torch.sigmoid(final_predictions), glabel_raw)
     return loss, acc, sacc_val, cacc_val, final_predictions

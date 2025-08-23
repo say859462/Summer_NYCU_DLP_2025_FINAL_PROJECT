@@ -133,7 +133,7 @@ def process_and_write_data(dataset, subset_path, subset_name):
                 pixels = [(int(x), int(y)) for x, y in line]
                 draw.line(pixels, fill=1, width=2)
 
-            img = img.transpose(Image.FLIP_TOP_BOTTOM)
+            # img = img.transpose(Image.FLIP_TOP_BOTTOM)
             arr = np.array(img, dtype=np.float32)
 
             arr_with_pad = np.zeros((padded_size, padded_size), dtype=np.float32)
@@ -143,13 +143,13 @@ def process_and_write_data(dataset, subset_path, subset_name):
             ] = arr
             stroke_images.append(arr_with_pad)
 
-            # --- 計算距離場 ---
-            inverted_arr = 1.0 - arr_with_pad
-            euclidean_distance = distance_transform_edt(inverted_arr)
-            k = 0.001
-            with np.errstate(over="ignore"):
-                distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
-            stroke_distance_fields.append(distance_field)
+            # # --- 計算距離場 ---
+            # inverted_arr = 1.0 - arr_with_pad
+            # euclidean_distance = distance_transform_edt(inverted_arr)
+            # k = 0.001
+            # with np.errstate(over="ignore"):
+            #     distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
+            # stroke_distance_fields.append(distance_field)
 
         img_raw_np = np.stack(stroke_images, axis=-1)
         edis_raw_np = np.stack(stroke_distance_fields, axis=-1)
@@ -157,9 +157,8 @@ def process_and_write_data(dataset, subset_path, subset_name):
         # 儲存的字典包含圖像、距離場、標籤和類別
         data_to_save = {
             "img_raw": torch.from_numpy(img_raw_np).float(),
-            "edis_raw": torch.from_numpy(edis_raw_np).float(),
             "glabel_raw": torch.from_numpy(glabel).long(),
-            "category": category_name,
+            # "category": category_name,  # 你的改進，可以保留
         }
 
         torch.save(data_to_save, os.path.join(subset_path, f"{idx}.pt"))
