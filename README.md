@@ -6,8 +6,7 @@
 
 這是一個基於 PyTorch 的 **[ContextSeg: Sketch Semantic Segmentation by Querying the Context with Attention](https://arxiv.org/abs/2311.16682)** 論文的完整實現版本。本專案旨在完整復現並優化原論文的兩階段方法，以實現對手繪草圖的精準語義部件分割。
 
-![Project Showcase](https://enigma-li.github.io/projects/contextSeg/images/teaser.png)
-_(圖片來源：原始論文)_
+![Paper Showcase](image.png)
 
 ---
 
