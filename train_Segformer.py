@@ -87,32 +87,14 @@ parser.add_argument(
     "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=200
 )
 parser.add_argument(
-    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=1000
+    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=2500
 )
 parser.add_argument(
     "--saveModelStep", help="每隔多少步儲存一次模型", type=int, default=5000
 )
 
-# ===== 這些是新加的，可直接貼在你現有 parser.add_argument(...) 列表的最後面 =====
-parser.add_argument("--optimizer", type=str, default="adamw",
+parser.add_argument("--optimizer", type=str, default="adam",
                     choices=["adam", "adamw"], help="最佳化器")
-parser.add_argument("--weight_decay", type=float, default=0.01, help="L2/AdamW 權重衰減")
-parser.add_argument("--scheduler", type=str, default="plateau",
-                    choices=["plateau", "cosine", "step", "none"], help="學習率排程器")
-parser.add_argument("--warmup_steps", type=int, default=2000, help="cosine warmup 迭代數")
-parser.add_argument("--step_size", type=int, default=20000, help="StepLR 的 step_size")
-parser.add_argument("--step_gamma", type=float, default=0.5, help="StepLR 的 gamma")
-
-parser.add_argument("--amp", action="store_true", help="啟用混合精度訓練 (torch.cuda.amp)")
-parser.add_argument("--max_grad_norm", type=float, default=1.0, help="梯度裁剪上限 (0=不裁剪)")
-parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers")
-parser.add_argument("--pin_memory", action="store_true", help="DataLoader pin_memory")
-parser.add_argument("--persistent_workers", action="store_true", help="DataLoader persistent_workers")
-
-parser.add_argument("--seed", type=int, default=42, help="隨機種子")
-parser.add_argument("--val_metric", type=str, default="SAcc",
-                    choices=["SAcc", "CAcc"], help="Plateau/最佳模型依據的驗證指標")
-parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss 的 gamma")
 
 
 # ====== 輔助函式 ======
@@ -758,16 +740,7 @@ if __name__ == "__main__":
         pe_target=64,
         rate=hyper_params["drop_rate"],
     ).to(device)
-    
-    # 固定隨機種子
-    import random, numpy as np
-    torch.manual_seed(hyper_params["seed"])
-    np.random.seed(hyper_params["seed"])
-    random.seed(hyper_params["seed"])
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(hyper_params["seed"])
 
-    # Optimizer
     if hyper_params["optimizer"] == "adamw":
         optimizer = optim.AdamW(
             transformer.parameters(),
@@ -785,31 +758,9 @@ if __name__ == "__main__":
             weight_decay=hyper_params["weight_decay"],
         )
 
-    # Scheduler
-    total_steps = hyper_params["maxIter"]
-    if hyper_params["scheduler"] == "plateau":
-        mode = "max"
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode=mode, factor=0.5, patience=10
-        )
-    elif hyper_params["scheduler"] == "cosine":
-        # 餘弦退火 + (線性) warmup
-        def lr_lambda(step):
-            if step < hyper_params["warmup_steps"]:
-                return float(step + 1) / float(max(1, hyper_params["warmup_steps"]))
-            progress = (step - hyper_params["warmup_steps"]) / float(
-                max(1, total_steps - hyper_params["warmup_steps"])
-            )
-            return 0.5 * (1.0 + np.cos(np.pi * progress))
-        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    elif hyper_params["scheduler"] == "step":
-        scheduler = optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=hyper_params["step_size"],
-            gamma=hyper_params["step_gamma"],
-        )
-    else:
-        scheduler = None  # 不用 scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=10
+    )
 
     logger.info("正在準備資料載入器...")
     train_loader = None
@@ -823,9 +774,6 @@ if __name__ == "__main__":
             ),
             batch_size=hyper_params["batchSize"],
             shuffle=True,
-            num_workers=hyper_params["num_workers"],
-            pin_memory=hyper_params["pin_memory"],
-            persistent_workers=hyper_params["persistent_workers"] and hyper_params["num_workers"] > 0,
             collate_fn=gpreg_collate_fn,
         )
 
@@ -833,11 +781,8 @@ if __name__ == "__main__":
         GPRegDataset(
             data_dir=hyper_params["dbDir"], raw_size=[256, 256], prefix="test"
         ),
-        batch_size=hyper_params["batchSize"],
-        shuffle=True,
-        num_workers=hyper_params["num_workers"],
-        pin_memory=hyper_params["pin_memory"],
-        persistent_workers=hyper_params["persistent_workers"] and hyper_params["num_workers"] > 0,
+        batch_size=1,
+        shuffle=False,
         collate_fn=gpreg_collate_fn,
     )
 
