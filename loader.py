@@ -28,7 +28,7 @@ class StrokeAugmentation:
                     rotate=(-15, 15),  # 旋轉：-15°到+15°
                     shear=(-5, 5),  # 輕微剪切保持流暢性
                     interpolation=Image.NEAREST,  # 最近鄰插值
-                    p=0.5,  # 應用概率
+                    p=1.0,  # 應用概率
                 )
             ],
             is_check_shapes=False,

@@ -737,7 +737,7 @@ if __name__ == "__main__":
         pe_target=64,
         rate=hyper_params["drop_rate"],
     ).to(device)
-    
+
     optimizer = optim.Adam(
         transformer.parameters(),
         lr=hyper_params["lr"],

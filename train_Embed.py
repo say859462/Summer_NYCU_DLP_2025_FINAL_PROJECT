@@ -132,9 +132,7 @@ def train_net(logger, output_folder, device):
     optimizer = optim.Adam(
         model.parameters(),
         lr=hyper_params["lr"],
-        weight_decay=1e-5,
-        betas=(0.9, 0.999),
-        eps=1e-7,
+        weight_decay=1e-5
     )
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     ckpt_dir = os.path.join(output_folder, "checkpoints")
