@@ -237,6 +237,25 @@ class GPRegDataset(Dataset):
 
         img_raw = data["img_raw"]  # [H, W, S]
         glabel_raw = data["glabel_raw"]  # [G, S]
+
+        if (
+            self.prefix == "train" and glabel_raw.shape[0] > 1
+        ):  # 只在訓練時且有多個組時排序
+            # 1. 計算每個組 (glabel_raw 的每一行) 包含的筆劃數
+            #    glabel_raw 中，值為 1 表示該筆劃屬於該組
+            stroke_counts_per_group = torch.sum(glabel_raw, dim=1)
+
+            # 2. 獲取用於降序排序的索引
+            sorted_indices = torch.argsort(stroke_counts_per_group, descending=True)
+
+            # 3. 根據排序後的索引，重新排列 glabel_raw
+            glabel_raw = glabel_raw[sorted_indices]
+
+            # 4. (重要) 如果 data 中包含 part_names 列表，也必須一同排序以保持對應關係
+            if "part_names" in data:
+                part_names = data["part_names"]
+                data["part_names"] = [part_names[i] for i in sorted_indices]
+
         nb_stroke = img_raw.shape[2]  # 直接從形狀獲取
         nb_gps = glabel_raw.shape[0]  # 直接從形狀獲取
 
