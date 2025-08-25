@@ -353,6 +353,8 @@ def cook_raw(batch_data):
         # ---- build adjacency graph from stroke masks ----
         stroke_masks = input_raw[i, :, :, : nb_strokes[i]].permute(2, 0, 1)  # (N,H,W)
         adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1)       # (N,N)
+        adj_matrix = adj_matrix.to(stroke_embeds.device)
+
         # ---- fuse with SeqSpaFusion ----
         stroke_embeds = seqspa_fusion(
             stroke_embeds.unsqueeze(0),      # (1,N,D)
@@ -855,6 +857,7 @@ if __name__ == "__main__":
         pe_target=64,
         rate=hyper_params["drop_rate"],
     ).to(device)
+    seqspa_fusion = SeqSpaFusion(d_model=hyper_params["d_model"]).to(device)
     optimizer = optim.Adam(
         transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
     )
