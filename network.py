@@ -73,35 +73,35 @@ class AutoencoderEmbed(nn.Module):
         # 編碼器
         self.encoder = nn.Sequential(
             CoordConv(x_dim, y_dim, 1, root_feature, kernel_size=3, padding=1),
-            nn.BatchNorm2d(root_feature),
+            nn.BatchNorm2d(root_feature, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 128
             nn.Conv2d(root_feature, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 8
             nn.Flatten(),
@@ -121,23 +121,23 @@ class AutoencoderEmbed(nn.Module):
         # 解碼器卷積部分
         decoder_conv = nn.Sequential(
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
             nn.Conv2d(root_feature, root_feature, 3, padding=1),
-            nn.BatchNorm2d(root_feature),
+            nn.BatchNorm2d(root_feature, momentum=0.95),  # <--- 已修改
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
         )

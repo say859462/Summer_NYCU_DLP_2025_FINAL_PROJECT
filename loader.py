@@ -64,9 +64,9 @@ class SketchAugmentation:
         self.geometric_augmentation = A.Compose(
             [
                 A.Affine(
-                    scale=(0.8, 1.2),  # 縮放：0.7-1.3倍
+                    scale=(0.8, 1.2),  # 縮放：0.8-1.2倍
                     translate_percent=(-0.15, 0.15),  # 平移：±15%
-                    rotate=(-15, 15),  # 旋轉：-30°到+30°
+                    rotate=(-15, 15),  # 旋轉：-15°到+15°
                     shear=(-10, 10),  # 輕微剪切
                     interpolation=Image.NEAREST,
                     p=1.0,  # 總是應用幾何變換
@@ -167,7 +167,7 @@ class AeDataset(Dataset):
         self.raw_size = raw_size
         self.augment = augment
         self.stroke_aug = StrokeAugmentation(
-            apply_prob=0.7 if augment else 0.0, img_size=raw_size[0]
+            apply_prob=0.5 if augment else 0.0, img_size=raw_size[0]
         )
         subset_path = os.path.join(data_dir, prefix)
 
@@ -212,6 +212,7 @@ class GPRegDataset(Dataset):
         super().__init__()
         self.raw_size = raw_size
         self.augment = augment
+        self.prefix = prefix
         self.sketch_aug = SketchAugmentation(
             apply_prob=0.5 if augment else 0.0, img_size=raw_size[0]
         )

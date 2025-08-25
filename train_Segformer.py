@@ -741,7 +741,8 @@ if __name__ == "__main__":
     optimizer = optim.Adam(
         transformer.parameters(),
         lr=hyper_params["lr"],
-        weight_decay=1e-5,
+        betas=(0.9,0.98),
+        eps=1e-9
     )
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
