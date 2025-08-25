@@ -737,8 +737,13 @@ if __name__ == "__main__":
         pe_target=64,
         rate=hyper_params["drop_rate"],
     ).to(device)
+    # 調成tensorflow的default , weight_decay是自己加的
     optimizer = optim.Adam(
-        transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
+        transformer.parameters(),
+        lr=hyper_params["lr"],
+        betas=(0.9, 0.999),
+        eps=1e-7,
+        weight_decay=1e-5,
     )
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

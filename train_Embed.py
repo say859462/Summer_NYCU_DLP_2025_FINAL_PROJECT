@@ -129,7 +129,13 @@ def train_net(logger, output_folder, device):
         train_logger.error(f"資料載入失敗: {e}")
         return
 
-    optimizer = optim.Adam(model.parameters(), lr=hyper_params["lr"])
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=hyper_params["lr"],
+        weight_decay=1e-5,
+        betas=(0.9, 0.999),
+        eps=1e-7,
+    )
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     ckpt_dir = os.path.join(output_folder, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
