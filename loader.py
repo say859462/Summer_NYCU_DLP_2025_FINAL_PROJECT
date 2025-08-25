@@ -28,7 +28,6 @@ class StrokeAugmentation:
                     rotate=(-15, 15),  # 旋轉：-15°到+15°
                     shear=(-5, 5),  # 輕微剪切保持流暢性
                     interpolation=Image.NEAREST,  # 最近鄰插值
-                    cval=0,  # 修正：使用 mask_value 代替 cval
                     p=0.5,  # 應用概率
                 )
             ],
@@ -70,7 +69,6 @@ class SketchAugmentation:
                     rotate=(-15, 15),  # 旋轉：-30°到+30°
                     shear=(-10, 10),  # 輕微剪切
                     interpolation=Image.NEAREST,
-                    cval=0,  # 修正：使用 mask_value
                     p=1.0,  # 總是應用幾何變換
                 )
             ],
@@ -89,7 +87,7 @@ class SketchAugmentation:
 
         # 隨機丟棄 strokes（10-30% 的 strokes）
         if nb_stroke > 3 and random.random() < 0.5:
-            img_raw, glabel_raw = self._random_discard_strokes(
+            img_raw, glabel_raw, nb_stroke = self._random_discard_strokes(
                 img_raw, glabel_raw, nb_stroke, nb_gp
             )
 
@@ -119,17 +117,26 @@ class SketchAugmentation:
         """
         隨機丟棄 strokes（10-30% 的 strokes）
         """
+        # 如果筆劃數 <= 1，直接返回原始數據
+        if nb_stroke <= 1:
+            return img_raw, glabel_raw, nb_stroke  # 修正：返回3個值
+
         # 計算要丟棄的 strokes 數量
         drop_ratio = random.uniform(0.1, 0.3)
         drop_count = max(1, int(nb_stroke * drop_ratio))
 
+        # 確保不丟棄所有筆劃
         if drop_count >= nb_stroke:
-            return img_raw, glabel_raw
+            return img_raw, glabel_raw, nb_stroke  # 修正：返回3個值
 
         # 隨機選擇要丟棄的 stroke 索引
-        valid_indices = [i for i in range(nb_stroke) if torch.any(img_raw[:, :, i] > 0)]
+        valid_indices = [
+            i
+            for i in range(min(nb_stroke, img_raw.shape[2]))
+            if torch.any(img_raw[:, :, i] > 0)
+        ]
         if len(valid_indices) <= drop_count:
-            return img_raw, glabel_raw
+            return img_raw, glabel_raw, nb_stroke  # 修正：返回3個值
 
         drop_indices = random.sample(valid_indices, drop_count)
 
@@ -143,7 +150,10 @@ class SketchAugmentation:
             # 移除該 stroke 的所有標籤
             new_glabel_raw[:, idx] = 0
 
-        return new_img_raw, new_glabel_raw
+        # 更新 nb_stroke（僅計算非空筆劃）
+        new_nb_stroke = int(torch.sum(torch.any(new_img_raw > 0, dim=(0, 1))))
+
+        return new_img_raw, new_glabel_raw, new_nb_stroke  # 正確：返回3個值
 
 
 class AeDataset(Dataset):
@@ -227,16 +237,23 @@ class GPRegDataset(Dataset):
 
         img_raw = data["img_raw"]  # [H, W, S]
         glabel_raw = data["glabel_raw"]  # [G, S]
+        nb_stroke = img_raw.shape[2]  # 直接從形狀獲取
+        nb_gps = glabel_raw.shape[0]  # 直接從形狀獲取
 
-        nb_stroke = glabel_raw.shape[1]
-        nb_gp = glabel_raw.shape[0]
-
+        if img_raw.shape[0] != self.raw_size[0] or img_raw.shape[1] != self.raw_size[1]:
+            loader_logger.error(
+                f"檔案 {self.file_list[index]} 的 img_raw 尺寸無效：{img_raw.shape}"
+            )
+            raise ValueError(f"無效圖像尺寸：{img_raw.shape}")
+        if torch.any(torch.isnan(img_raw)) or torch.any(torch.isinf(img_raw)):
+            loader_logger.error(f"檔案 {self.file_list[index]} 的 img_raw 包含無效值")
+            raise ValueError("圖像數據包含 NaN 或 Inf")
         if self.augment:
-            img_raw, glabel_raw, _, _ = self.sketch_aug(
-                (img_raw, glabel_raw, nb_stroke, nb_gp)
+            img_raw, glabel_raw, nb_stroke, nb_gps = self.sketch_aug(
+                (img_raw, glabel_raw, nb_stroke, nb_gps)
             )
 
-        return img_raw, glabel_raw, nb_stroke, nb_gp
+        return img_raw, glabel_raw, int(nb_stroke), int(nb_gps)
 
 
 def gpreg_collate_fn(batch):

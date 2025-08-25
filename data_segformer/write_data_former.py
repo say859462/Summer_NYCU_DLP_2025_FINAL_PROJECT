@@ -4,14 +4,9 @@ import numpy as np
 from PIL import Image, ImageDraw
 import torch
 import random
-from scipy.ndimage import distance_transform_edt
 
-# --- 1. 設定 (單一檔案 & 包含距離場) ---
-# 指定單一輸入檔案路徑
-# 請根據您的環境修改此路徑
+# --- 1. 設定 ---
 input_file_path = r"SPG\\Perceptual Grouping\\airplane.ndjson"
-
-# 輸出資料夾
 output_dir = "data_former_pt"
 os.makedirs(output_dir, exist_ok=True)
 train_dir = os.path.join(output_dir, "train")
@@ -19,34 +14,22 @@ test_dir = os.path.join(output_dir, "test")
 os.makedirs(train_dir, exist_ok=True)
 os.makedirs(test_dir, exist_ok=True)
 
-# 圖像與距離場設定
 img_size = 156
 padded_size = 256
 
-# --- 2. 讀取與切分資料 (還原原版切分邏輯) ---
+# --- 2. 讀取與切分資料 (80% training, 20% test) ---
 print(f"正在從 {input_file_path} 讀取資料...")
-# 檢查副檔名，使其能同時處理 .json 和 .ndjson
-file_ext = os.path.splitext(input_file_path)[1]
-if file_ext not in [".json", ".ndjson"]:
-    raise ValueError(f"不支援的檔案格式: {file_ext}")
 
 with open(input_file_path, "r", encoding="utf8") as fp:
     json_data = json.load(fp)
 
-# 從檔名中提取類別名稱
-category_name = os.path.splitext(os.path.basename(input_file_path))[0]
+data_list = json_data["train_data"]
+random.shuffle(data_list)
 
-# 將 (sketch 數據, 類別名稱) 存入 list
-sketches_with_category = []
-for sketch in json_data["train_data"]:
-    sketches_with_category.append((sketch, category_name))
-
-random.shuffle(sketches_with_category)
-
-# 採用原版的固定數量切分法
-train_split_count = 700
-train_data = sketches_with_category[:train_split_count]
-test_data = sketches_with_category[train_split_count:]
+# 使用80%作為training data
+split_index = int(len(data_list) * 0.8)
+train_data = data_list[:split_index]
+test_data = data_list[split_index:]
 
 print(f"資料讀取完成。")
 print(f"訓練集: {len(train_data)} 筆, 測試集: {len(test_data)} 筆。")
@@ -54,22 +37,31 @@ print(f"訓練集: {len(train_data)} 筆, 測試集: {len(test_data)} 筆。")
 
 # --- 3. 輔助函式 ---
 def get_bounds(data, factor=1):
+    """Return bounds of data."""
     min_x, max_x, min_y, max_y = 0, 0, 0, 0
     abs_x, abs_y = 0, 0
+
     for i in range(len(data)):
-        x, y = float(data[i][0]) / factor, float(data[i][1]) / factor
+        x = float(data[i][0]) / factor
+        y = float(data[i][1]) / factor
         abs_x += x
         abs_y += y
-        min_x, min_y = min(min_x, abs_x), min(min_y, abs_y)
-        max_x, max_y = max(max_x, abs_x), max(max_y, abs_y)
+        min_x = min(min_x, abs_x)
+        min_y = min(min_y, abs_y)
+        max_x = max(max_x, abs_x)
+        max_y = max(max_y, abs_y)
+
     return (min_x, max_x, min_y, max_y)
 
 
 def scale_bound(stroke, average_dimension=img_size):
+    """Scale an entire image to be less than a certain size."""
     bounds = get_bounds(stroke, 1)
     max_dimension = max(bounds[1] - bounds[0], bounds[3] - bounds[2])
+
     if max_dimension == 0:
         return np.array(stroke)
+
     stroke = np.array(stroke)
     scale = max_dimension / average_dimension
     stroke[:, 0:2] = stroke[:, 0:2] / scale
@@ -77,10 +69,12 @@ def scale_bound(stroke, average_dimension=img_size):
 
 
 def strokes_to_lines(strokes):
+    """Convert stroke-3 format to polyline format."""
     strokes = scale_bound(strokes)
     x, y = 0, 0
     lines, line, group_id = [], [], []
     cur_group_ip = -1
+
     for i in range(len(strokes)):
         if strokes[i][2] == 1:
             x += float(strokes[i][0])
@@ -94,82 +88,111 @@ def strokes_to_lines(strokes):
             y += float(strokes[i][1])
             line.append([x, y])
             cur_group_ip = int(strokes[i][3])
+
     return lines, group_id
 
 
 def find_duplicate_indices(lst, num_groups):
+    """Find indices for each group."""
     result = [[] for _ in range(num_groups)]
+
     for i, num in enumerate(lst):
         if num != -1 and num < num_groups:
-            result[num].append(i)
+            result[int(num)].append(i)
+
     return result
 
 
-# --- 4. 資料處理與寫入函式 ---
-def process_and_write_data(dataset, subset_path, subset_name):
-    print(f"正在處理並寫入 {subset_name} 資料...")
-    for idx, (sketch_data, category_name) in enumerate(dataset):
-        lines, group_id = strokes_to_lines(sketch_data)
+# --- 4. 資料處理函式 ---
+def process_data(dataset, subset_name):
+    print(f"正在處理 {subset_name} 資料...")
 
-        valid_group_ids = [gid for gid in group_id if gid != -1]
-        if not valid_group_ids:
+    input_raw_list = []
+    glabel_raw_list = []
+    valid_count = 0
+
+    for idx, line_list in enumerate(dataset):
+        try:
+            lines, group_id = strokes_to_lines(line_list)
+
+            # 過濾無效的 group_id
+            valid_group_ids = [gid for gid in group_id if gid != -1]
+            if not valid_group_ids:
+                continue
+
+            nb_stroke = len(lines)
+            nb_group = max(valid_group_ids) + 1  # 根據實際group數量設置
+
+            index_group = find_duplicate_indices(group_id, nb_group)
+
+            # 創建 group label
+            glabel = np.zeros((nb_group, nb_stroke), dtype=np.int64)
+            for row, row_indices in enumerate(index_group):
+                for col in row_indices:
+                    if col < nb_stroke:  # 確保索引不越界
+                        glabel[row][col] = 1
+
+            # 創建 stroke 圖像
+            stroke_images = []
+            for line in lines:
+                img = Image.new("1", (img_size, img_size), 0)
+                draw = ImageDraw.Draw(img)
+
+                if len(line) >= 2:
+                    pixels = [(int(x), int(y)) for x, y in line]
+                    draw.line(pixels, fill=1, width=2)
+
+                arr = np.array(img, dtype=np.float32)
+
+                # 填充到 256x256
+                arr_with_pad = np.zeros((padded_size, padded_size), dtype=np.float32)
+                start_pos = (padded_size - img_size) // 2
+                arr_with_pad[
+                    start_pos : start_pos + img_size, start_pos : start_pos + img_size
+                ] = arr
+
+                stroke_images.append(arr_with_pad)
+
+            # 轉換為正確的形狀 (256, 256, num_strokes)
+            img_raw = np.stack(stroke_images, axis=-1)
+
+            input_raw_list.append(img_raw)
+            glabel_raw_list.append(glabel)
+            valid_count += 1
+
+        except Exception as e:
+            print(f"處理第 {idx} 個樣本時出錯: {e}")
             continue
 
-        nb_stroke = len(lines)
-        nb_group = max(valid_group_ids) + 1
+    print(f"{subset_name} 處理完成，有效樣本數: {valid_count}")
+    return input_raw_list, glabel_raw_list
 
-        index_group = find_duplicate_indices(group_id, nb_group)
 
-        # 4. 使用排序後的 group 資訊來建立 glabel
-        glabel = np.zeros((nb_group, nb_stroke), dtype=np.int64)
-        for row, row_indices in enumerate(index_group):
-            for col in row_indices:
-                glabel[row][col] = 1
+# --- 5. 處理訓練和測試數據 ---
+train_input_raw, train_glabel_raw = process_data(train_data, "train")
+test_input_raw, test_glabel_raw = process_data(test_data, "test")
 
-        stroke_images = []
-        stroke_distance_fields = []
-        for line in lines:
-            img = Image.new("1", (img_size, img_size), 0)
-            draw = ImageDraw.Draw(img)
-            if len(line) >= 2:
-                pixels = [(int(x), int(y)) for x, y in line]
-                draw.line(pixels, fill=1, width=2)
 
-            # img = img.transpose(Image.FLIP_TOP_BOTTOM)
-            arr = np.array(img, dtype=np.float32)
+# --- 6. 保存為 PyTorch 格式 ---
+def save_as_pt(input_list, glabel_list, save_dir):
+    print(f"正在保存數據到 {save_dir}...")
 
-            arr_with_pad = np.zeros((padded_size, padded_size), dtype=np.float32)
-            start_pos = (padded_size - img_size) // 2
-            arr_with_pad[
-                start_pos : start_pos + img_size, start_pos : start_pos + img_size
-            ] = arr
-            stroke_images.append(arr_with_pad)
-
-            # # --- 計算距離場 ---
-            # inverted_arr = 1.0 - arr_with_pad
-            # euclidean_distance = distance_transform_edt(inverted_arr)
-            # k = 0.001
-            # with np.errstate(over="ignore"):
-            #     distance_field = 1.0 / (1.0 + k * np.exp(euclidean_distance))
-            # stroke_distance_fields.append(distance_field)
-
-        img_raw_np = np.stack(stroke_images, axis=-1)
-        # edis_raw_np = np.stack(stroke_distance_fields, axis=-1)
-
-        # 儲存的字典包含圖像、距離場、標籤和類別
+    for idx, (img_raw, glabel_raw) in enumerate(zip(input_list, glabel_list)):
         data_to_save = {
-            "img_raw": torch.from_numpy(img_raw_np).float(),
-            "glabel_raw": torch.from_numpy(glabel).long(),
-            # "category": category_name,
+            "img_raw": torch.from_numpy(img_raw).float(),
+            "glabel_raw": torch.from_numpy(glabel_raw).long(),
         }
 
-        torch.save(data_to_save, os.path.join(subset_path, f"{idx}.pt"))
+        torch.save(data_to_save, os.path.join(save_dir, f"{idx}.pt"))
 
-    print(f"{subset_name} 資料寫入完成。")
+    print(f"已保存 {len(input_list)} 個樣本")
 
 
-# --- 5. 執行處理 ---
-process_and_write_data(train_data, train_dir, "train")
-process_and_write_data(test_data, test_dir, "test")
+# 保存訓練和測試數據
+save_as_pt(train_input_raw, train_glabel_raw, train_dir)
+save_as_pt(test_input_raw, test_glabel_raw, test_dir)
 
 print("所有流程執行完畢。")
+print(
+    f"總計 - 訓練集: {len(train_input_raw)} 個有效樣本, 測試集: {len(test_input_raw)} 個有效樣本"
+)

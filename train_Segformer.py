@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import cv2
+from PIL import Image
 
 # 從您提供的 PyTorch 檔案中匯入模組
 from loader import GPRegDataset, gpreg_collate_fn
@@ -59,7 +60,7 @@ parser.add_argument(
     "--accum_steps",
     help="梯度累積步數，等效 batch size = batchSize * accum_steps",
     type=int,
-    default=1,
+    default=4,
 )
 parser.add_argument("--lr", help="學習率", type=float, default=1e-4)
 parser.add_argument("--d_model", help="模型的特徵維度", type=int, default=256)
@@ -80,13 +81,13 @@ parser.add_argument(
     "--teacher_forcing_decay_steps",
     help="Teacher forcing 衰減步數",
     type=int,
-    default=100000,
+    default=50000,
 )
 parser.add_argument(
     "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=100
 )
 parser.add_argument(
-    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=2000
+    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=3000
 )
 parser.add_argument(
     "--saveModelStep", help="每隔多少步儲存一次模型", type=int, default=5000
@@ -256,7 +257,8 @@ def cook_raw(batch_data):
 
 def generate_grouped_image(stroke_images, group_labels):
     num_groups = group_labels.shape[0]
-    canvas = torch.ones(stroke_images.shape[0], stroke_images.shape[1], 3)
+    H, W = stroke_images.shape[0], stroke_images.shape[1]
+    canvas = torch.ones(H, W, 3)
     colors = (
         torch.tensor(
             [
@@ -274,13 +276,63 @@ def generate_grouped_image(stroke_images, group_labels):
         / 255.0
     )
     stroke_images, group_labels = stroke_images.cpu(), group_labels.cpu()
+
     for i in range(num_groups):
         color = colors[i % len(colors)]
-        group_img = group_images(stroke_images, group_labels[i : i + 1, :])
-        mask = (1.0 - group_img).unsqueeze(-1)
+        # 獲取當前組的標籤
+        group_mask = group_labels[i : i + 1, :]
+        # 創建該組的圖像
+        group_img = torch.zeros(H, W)
+
+        # 找到屬於這個組的所有筆劃
+        stroke_indices = torch.where(group_mask[0] == 1)[0]
+        for idx in stroke_indices:
+            if idx < stroke_images.shape[2]:  # 確保索引有效
+                group_img = torch.maximum(group_img, stroke_images[:, :, idx])
+
+        mask = group_img.unsqueeze(-1)  # 添加通道維度
         colored_layer = color.view(1, 1, 3) * mask
         canvas = canvas * (1.0 - mask) + colored_layer
+
+    # 確保圖像值在正確範圍內並轉換為uint8
+    canvas = torch.clamp(canvas, 0, 1)
     return (canvas * 255).numpy().astype(np.uint8)
+
+
+def save_image_safe(img_array, filepath):
+    """安全保存圖像，確保尺寸和格式正確"""
+    # 確保圖像是有效的2D或3D數組
+    if len(img_array.shape) == 3 and img_array.shape[2] == 3:
+        # 已經是RGB格式
+        pass
+    elif len(img_array.shape) == 2:
+        # 灰度圖轉換為RGB
+        img_array = np.stack([img_array] * 3, axis=-1)
+    else:
+        # 其他情況，取第一個通道或轉換為灰度
+        img_array = img_array[:, :, 0] if img_array.shape[2] > 0 else img_array
+        img_array = np.stack([img_array] * 3, axis=-1)
+
+    # 確保圖像尺寸合理
+    if img_array.shape[0] > 10000 or img_array.shape[1] > 10000:
+        # 如果尺寸過大，進行縮放
+        scale = 1000 / max(img_array.shape[0], img_array.shape[1])
+        new_size = (int(img_array.shape[1] * scale), int(img_array.shape[0] * scale))
+        img_array = cv2.resize(img_array, new_size)
+
+    # 保存為JPEG格式避免PNG問題
+    if filepath.endswith(".png"):
+        filepath = filepath.replace(".png", ".jpg")
+
+    success = cv2.imwrite(filepath, img_array)
+    if not success:
+        print(f"警告: 無法保存圖像到 {filepath}")
+        # 嘗試使用PIL作為備用
+        try:
+            Image.fromarray(img_array).save(filepath)
+            print(f"使用PIL成功保存圖像到 {filepath}")
+        except Exception as e:
+            print(f"使用PIL保存圖像也失敗: {e}")
 
 
 # ====== 訓練與測試流程 ======
@@ -319,6 +371,11 @@ def test_autoregre_step(batch_data):
 def train_net():
     logger.info("--- 開始訓練 ---")
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
+
+    # ====== NEW: 建立用於儲存驗證過程圖片的資料夾 ======
+    val_img_folder = os.path.join(output_folder, "validation_imgs")
+    os.makedirs(val_img_folder, exist_ok=True)
+
     step = hyper_params.get("start_step", 0)
     accumulation_steps = hyper_params.get("accum_steps", 1)
 
@@ -351,6 +408,9 @@ def train_net():
         transformer.train()
         inp_embed, tar_embed, labels = cook_raw(batch_data)
 
+        # 獲取目標序列長度（不包括start token）
+        target_seq_len = tar_embed.shape[1] - 1  # 減去start token
+
         # 獲取當前 teacher forcing ratio
         tf_ratio = get_teacher_forcing_ratio(step, tf_start, tf_end, tf_decay_steps)
 
@@ -361,18 +421,19 @@ def train_net():
 
         if use_teacher_forcing:
             # 使用 ground truth 作為 decoder 輸入
-            tar_for_input = tar_embed[:, :-1, :]
+            tar_for_input = tar_embed[:, :-1, :]  # 移除最後一個token作為輸入
+            # 預期的輸出應該是tar_embed[:, 1:, :]，但我們直接使用labels
         else:
             # 使用模型預測作為 decoder 輸入 (auto-regressive)
-            # 這裡需要模擬推理時的 auto-regressive 過程
             batch_size = inp_embed.shape[0]
-            max_groups = tar_embed.shape[1] - 1  # 減去 start token
 
             # 初始化 decoder 輸入 (只有 start token)
             decoder_input = tar_embed[:, :1, :]  # start token
 
-            # 逐步生成 group tokens
-            for group_idx in range(max_groups):
+            # 逐步生成，但限制最大長度為target_seq_len
+            max_gen_steps = min(target_seq_len, hyper_params["num_of_group"])
+
+            for group_idx in range(max_gen_steps):
                 enc_mask, combined_mask, dec_mask = create_masks(
                     inp_embed, decoder_input
                 )
@@ -385,7 +446,6 @@ def train_net():
                 pred_labels = torch.round(torch.sigmoid(last_pred))
 
                 # 根據預測生成對應的 group embedding
-                # 這裡需要根據 pred_labels 生成對應的 group 影像並編碼
                 group_embeddings = []
                 for i in range(batch_size):
                     # 獲取當前樣本的原始筆劃數
@@ -399,7 +459,7 @@ def train_net():
                     # 將預測標籤裁剪到原始筆劃數，避免越界
                     valid_pred_labels = pred_labels[i][:, :num_original_strokes]
 
-                    # 根據【裁剪後】的預測標籤生成 group 影像
+                    # 根據裁剪後的預測標籤生成 group 影像
                     grouped_img = group_images(stroke_images, valid_pred_labels)
                     # 編碼 group 影像
                     group_embed = de_modelAESSG.encode(grouped_img.unsqueeze(1))
@@ -409,18 +469,41 @@ def train_net():
                 new_tokens = torch.stack(group_embeddings, dim=0)
                 decoder_input = torch.cat([decoder_input, new_tokens], dim=1)
 
-            tar_for_input = decoder_input
+            # 確保decoder_input的長度正確（移除start token用於輸入）
+            if decoder_input.shape[1] > 1:
+                tar_for_input = decoder_input[:, 1:, :]  # 移除start token
+            else:
+                # 如果只有start token，創建一個dummy輸入
+                tar_for_input = torch.full(
+                    (batch_size, 1, hyper_params["d_model"]), -1.0, device=device
+                )
 
+        # 確保tar_for_input和labels的序列長度一致
+        min_seq_len = min(tar_for_input.shape[1], labels.shape[1])
+        tar_for_input = tar_for_input[:, :min_seq_len, :]
+        labels_trimmed = labels[:, :min_seq_len, :]
+
+        # 生成masks和進行前向傳播
         enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
 
         predictions, _ = transformer(
             inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
         )
-        # 在自迴歸模式下，預測序列會比標籤序列多一個，我們需要將其裁切掉
-        if predictions.shape[1] > labels.shape[1]:
-            predictions = predictions[:, : labels.shape[1], :]
+
+        # 確保predictions和labels的形狀完全一致
+        if predictions.shape[1] != labels_trimmed.shape[1]:
+            min_len = min(predictions.shape[1], labels_trimmed.shape[1])
+            predictions = predictions[:, :min_len, :]
+            labels_trimmed = labels_trimmed[:, :min_len, :]
+
+        # 額外檢查最後一維
+        if predictions.shape[2] != labels_trimmed.shape[2]:
+            min_last_dim = min(predictions.shape[2], labels_trimmed.shape[2])
+            predictions = predictions[:, :, :min_last_dim]
+            labels_trimmed = labels_trimmed[:, :, :min_last_dim]
+
         # 使用 Focal Loss (gamma=2.0)
-        loss, acc = loss_fn(labels, predictions)
+        loss, acc = loss_fn(labels_trimmed, predictions)
 
         loss = loss / accumulation_steps
         loss.backward()
@@ -430,31 +513,78 @@ def train_net():
             optimizer.zero_grad()
 
         if step % hyper_params["dispLossStep"] == 0:
-            sacc_val = sacc(torch.sigmoid(predictions), labels)
-            cacc_val = cacc(torch.sigmoid(predictions), labels)
+            sacc_val = sacc(torch.sigmoid(predictions), labels_trimmed)
+            cacc_val = cacc(torch.sigmoid(predictions), labels_trimmed)
             logger.info(
                 f"步驟 [{step}/{hyper_params['maxIter']}], "
                 f"損失: {loss.item() * accumulation_steps:.6f}, "
                 f"Acc: {acc.item():.6f}, "
                 f"SAcc: {sacc_val.item():.6f}, "
                 f"CAcc: {cacc_val:.6f}, "
-                f"TF Ratio: {tf_ratio:.3f}"
+                f"TF Ratio: {tf_ratio:.3f}, "
             )
             writer.add_scalar("Loss/train", loss.item() * accumulation_steps, step)
             writer.add_scalar("SAcc/train", sacc_val.item(), step)
             writer.add_scalar("CAcc/train", cacc_val, step)
             writer.add_scalar("Teacher_Forcing_Ratio", tf_ratio, step)
 
+        # ... rest of validation and saving code remains the same
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
             test_iter = iter(test_loader)
             while True:
                 try:
                     batch_data_val = next(test_iter)
-                    loss_v, _, sacc_v, cacc_v, _ = test_autoregre_step(batch_data_val)
+                    loss_v, _, sacc_v, cacc_v, final_predictions_val = (
+                        test_autoregre_step(batch_data_val)
+                    )
                     val_loss += loss_v.item()
                     val_sacc += sacc_v.item()
                     val_cacc += cacc_v
+                    if count < 3:
+                        input_raw, glabel_raw, nb_strokes, _ = batch_data_val
+                        n = (
+                            int(nb_strokes[0].item())
+                            if torch.is_tensor(nb_strokes[0])
+                            else int(nb_strokes[0])
+                        )
+
+                        gt_vis_img = generate_grouped_image(
+                            input_raw[0, :, :, :n], glabel_raw[0]
+                        )
+                        pred_vis_img = generate_grouped_image(
+                            input_raw[0, :, :, :n],
+                            torch.round(torch.sigmoid(final_predictions_val[0])),
+                        )
+
+                        # 確保轉 numpy + uint8
+                        def to_uint8(img):
+                            if torch.is_tensor(img):
+                                img = img.detach().cpu().numpy()
+                            if img.max() <= 1.0:  # 假設是 0~1 範圍
+                                img = (img * 255).astype(np.uint8)
+                            else:
+                                img = img.astype(np.uint8)
+                            return img
+
+                        gt_vis_img = to_uint8(gt_vis_img)
+                        pred_vis_img = to_uint8(pred_vis_img)
+
+                        os.makedirs(val_img_folder, exist_ok=True)
+                        save_image_safe(
+                            gt_vis_img,
+                            os.path.join(
+                                val_img_folder, f"val_step_{step}_sample_{count}_gt.jpg"
+                            ),
+                        )
+                        save_image_safe(
+                            pred_vis_img,
+                            os.path.join(
+                                val_img_folder,
+                                f"val_step_{step}_sample_{count}_pred.jpg",
+                            ),
+                        )
+
                     count += 1
                 except StopIteration:
                     break
@@ -542,11 +672,15 @@ def test_net():
                 input_raw[0, :, :, : nb_strokes[0]],
                 torch.round(torch.sigmoid(final_predictions[0])),
             )
-            cv2.imwrite(
-                os.path.join(img_folder, f"{test_itr}_g_label.jpeg"), gt_vis_img
+
+            save_image_safe(
+                gt_vis_img, os.path.join(img_folder, f"{test_itr}_g_label.jpeg")
             )
-            cv2.imwrite(
-                os.path.join(img_folder, f"{test_itr}_g_pred.jpeg"), pred_vis_img
+            save_image_safe(
+                pred_vis_img,
+                os.path.join(
+                    pred_vis_img, os.path.join(img_folder, f"{test_itr}_g_pred.jpeg")
+                ),
             )
             test_itr += 1
         except StopIteration:
@@ -600,7 +734,11 @@ if __name__ == "__main__":
         rate=hyper_params["drop_rate"],
     ).to(device)
     optimizer = optim.Adam(
-        transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
+        transformer.parameters(),
+        lr=hyper_params["lr"],
+        betas=(0.9, 0.98),
+        eps=1e-9,
+        weight_decay=1e-5,
     )
 
     logger.info("正在準備資料載入器...")
