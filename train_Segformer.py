@@ -826,6 +826,7 @@ if __name__ == "__main__":
             num_workers=hyper_params["num_workers"],
             pin_memory=hyper_params["pin_memory"],
             persistent_workers=hyper_params["persistent_workers"] and hyper_params["num_workers"] > 0,
+            collate_fn=gpreg_collate_fn,
         )
 
     test_loader = DataLoader(
@@ -837,6 +838,7 @@ if __name__ == "__main__":
         num_workers=hyper_params["num_workers"],
         pin_memory=hyper_params["pin_memory"],
         persistent_workers=hyper_params["persistent_workers"] and hyper_params["num_workers"] > 0,
+        collate_fn=gpreg_collate_fn,
     )
 
     logger.info(f"正在從 {hyper_params['embed_ckpt']} 載入預訓練的 Embedding 模型...")
