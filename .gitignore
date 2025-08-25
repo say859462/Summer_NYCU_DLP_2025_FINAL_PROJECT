@@ -1,7 +1,7 @@
 *.pdf
 *.zip
 *.pth
-/SPG
+**/SPG
 /CS
 *.txt
 *.pt
