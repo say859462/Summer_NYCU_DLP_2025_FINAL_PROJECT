@@ -60,7 +60,7 @@ parser.add_argument(
     "--accum_steps",
     help="梯度累積步數，等效 batch size = batchSize * accum_steps",
     type=int,
-    default=4,
+    default=1,
 )
 parser.add_argument("--lr", help="學習率", type=float, default=1e-4)
 parser.add_argument("--d_model", help="模型的特徵維度", type=int, default=256)
@@ -84,10 +84,10 @@ parser.add_argument(
     default=50000,
 )
 parser.add_argument(
-    "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=100
+    "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=1000
 )
 parser.add_argument(
-    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=3000
+    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=1000
 )
 parser.add_argument(
     "--saveModelStep", help="每隔多少步儲存一次模型", type=int, default=5000
