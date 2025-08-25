@@ -87,7 +87,7 @@ parser.add_argument(
     "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=200
 )
 parser.add_argument(
-    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=1000
+    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=2500
 )
 parser.add_argument(
     "--saveModelStep", help="每隔多少步儲存一次模型", type=int, default=5000

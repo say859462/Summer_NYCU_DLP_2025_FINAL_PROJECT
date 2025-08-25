@@ -1,57 +1,78 @@
-# ContextSeg-PyTorch: 論文《ContextSeg》的 PyTorch 實現
+# ContextSeg-PyTorch
 
-這是一個基於 PyTorch 的 [ContextSeg: Sketch Semantic Segmentation by Querying the Context with Attention](https://arxiv.org/abs/2311.16682) 論文實現版本。
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-%23EE4C2C.svg?style=flat&logo=PyTorch&logoColor=white)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-此專案將原始的 TensorFlow 程式碼完全轉換為 PyTorch，並進行了以下主要修改：
+這是一個基於 PyTorch 的 **[ContextSeg: Sketch Semantic Segmentation by Querying the Context with Attention](https://arxiv.org/abs/2311.16682)** 論文的完整實現版本。本專案旨在完整復現並優化原論文的兩階段方法，以實現對手繪草圖的精準語義部件分割。
 
-- **框架轉換**：所有模型架構、訓練迴圈和資料載入器都已從 TensorFlow/Keras 轉換為 PyTorch。
-- **依賴性簡化**：將距離場計算從 GeodisTK 函式庫替換為 `scipy`，大幅簡化了環境設定的複雜性。
-- **資料格式更新**：移除對 `tfrecord` 的依賴，改用 PyTorch 原生的 `.pt` 格式來儲存預處理後的資料，徹底解決了 TensorFlow 和相關套件的版本衝突問題。
-- **額外實作**：相較於 source code，paper 提到很多原本 code 沒有實作的細節，例如 loss function 的定義、DF k 值選擇、以及 data augmentation，在這裡都將其實做出來，後續經由實驗選擇較好者。train_segformer.py增加focal loss，scheduled sampling
+![Project Showcase](https://enigma-li.github.io/projects/contextSeg/images/teaser.png)
+_(圖片來源：原始論文)_
 
-## 專案結構
+---
 
-```
-.
-├── data/              # (手動建立) 存放原始 .ndjson 資料集
-├── data_embed_pt/     # (腳本生成) 存放嵌入網路的 .pt 訓練資料
-├── data_former_pt/    # (腳本生成) 存放分割網路的 .pt 訓練資料
-├── result/            # (腳本生成) 存放訓練結果、模型權重和日誌
-├── README.md          # 本文件
-├── network.py         # PyTorch 模型架構
-├── loader.py          # PyTorch 資料載入器
-├── write_data_embed.py  # 預處理腳本 (階段一)
-├── write_data_former.py # 預處理腳本 (階段二)
-├── train_Embed.py     # 訓練腳本 (階段一)
-└── train_Segformer.py   # 訓練腳本 (階段二)
-```
+## ✨ 專案亮點
 
-## 環境設定
+此專案將原始的 TensorFlow 程式碼完全轉換為 PyTorch，並進行了以下核心改進：
 
-建議使用 Python 3.11 或更新版本。
+- **✅ 現代化框架**：所有模型架構、訓練迴圈和資料載入器都已從 TensorFlow/Keras 轉換為 PyTorch，更易於除錯與擴展。
+- **📦 高效資料管道**：移除了對 `tfrecord` 的依賴，改用 PyTorch 原生的 `.pt` 格式儲存預處理資料，徹底解決了 TensorFlow 版本衝突問題，並提升了資料讀取效率。
+- **📝 忠於論文實現**：根據論文補充了官方原始碼中未實現的關鍵細節，包括：
+  - **Focal Loss**：用於解決部件類別不平衡問題。
+  - **Scheduled Sampling**：動態調整 Teacher Forcing 比例，縮小訓練與推論的差距。
+  - **動態學習率**：引入 `ReduceLROnPlateau` 排程器，使訓練過程更智慧。
+- **🔧 增強的訓練腳本**：提供了更穩健的訓練、續訓、測試與視覺化流程，並包含詳細的日誌與 TensorBoard 監控。
 
-您可以使用 `pip` 來安裝所有必要的 Python 套件：
+## ⚙️ 架構總覽
+
+本專案嚴格遵循論文的兩階段架構：
+
+1.  **階段一：筆劃嵌入網路 (Stroke Embedding Network)**
+
+    - 訓練一個通用的 `AutoencoderEmbed` 模型，學習將單個筆劃或筆劃組的圖像編碼為高品質的特徵向量 (Embedding)。此階段會使用所有類別的資料。
+
+2.  **階段二：分割 Transformer (Segmentation Transformer)**
+    - 固定第一階段的編碼器權重，將其作為特徵提取器。
+    - 訓練一個 `GpTransformer` 模型，它以自迴歸 (Auto-regressive) 的方式，根據筆劃嵌入的上下文來預測各個語義部件。此階段針對每個類別單獨訓練。
+
+## 🚀 快速開始
+
+請依照以下步驟來設定環境、預處理資料並進行模型訓練。
+
+### 1. 複製專案
 
 ```bash
-pip install torch torchvision numpy == 1.26.4  Pillow ujson opencv-python==4.8.1.78  albumentations
+git clone <your-repository-url>
 ```
 
-> **註**：建議安裝 NumPy 1.x 版本 (`<2`) 以確保與某些相依套件的最佳相容性。
+### 2. 環境設定
 
-## 使用教學
+建議使用 **Python 3.11** 或更新版本，並建立一個虛擬環境。
 
-請依照以下步驟來執行完整的資料處理與模型訓練流程。
+```bash
+# 建立並啟用虛擬環境 (推薦)
+python -m venv venv
+source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
 
-### 步驟 1：下載並準備資料集
+# 安裝所有必要的 Python 套件
+pip install torch torchvision numpy==1.26.4 Pillow ujson opencv-python==4.8.1.78 tensorboard albumentations tqdm GeodisTK
+```
 
-從以下連結下載原始資料集，並將其 `.ndjson` (或 `.json`) 檔案放入您手動建立的 `data/` 資料夾中。
+> **⚠️ 注意**：
+>
+> - `numpy` 建議安裝 `1.x` 版本 (`<2`) 以確保與某些相依套件的最佳相容性。
+> - `torch` 的安裝指令可能需要根據您的 CUDA 版本進行調整。請參考 [PyTorch 官網](https://pytorch.org/get-started/locally/) 的說明。
 
-- [SPG Dataset (於 SketchX 中)](https://www.google.com/search?q=http://sketchx.dr-cg.com/share)
-- [CreativeSketch Dataset](https://www.google.com/search?q=https://github.com/facebookresearch/CreativeSketch)
+### 3. 下載並準備資料集
 
-### 步驟 2：預處理資料
+1.  手動建立一個 `data/` 資料夾。
+2.  從以下連結下載原始資料集，並將其 `.ndjson` (或 `.json`) 檔案放入 `data/` 資料夾中。
+    - [SPG Dataset (於 SketchX 中)](https://github.com/KeLi-SketchX/SketchX-PRIS-Dataset)
+    - [CreativeSketch Dataset](https://songweige.github.io/projects/creative_sketech_generation/gallery_creatures.html)
 
-執行以下兩個腳本來處理原始的資料檔案。它們會讀取 `data/` 中的檔案，並在 `data_embed_pt/` 和 `data_former_pt/` 中生成 PyTorch (`.pt`) 格式的訓練檔案。
+### 4. 預處理資料
+
+執行以下兩個腳本來生成 PyTorch (`.pt`) 格式的訓練檔案。
 
 ```bash
 # 為第一階段的嵌入網路準備資料 (合併所有類別)
@@ -61,29 +82,58 @@ python write_data_embed.py
 python write_data_former.py
 ```
 
-### 步驟 3：訓練筆劃嵌入網路 (階段一)
+執行完畢後，您應該會在根目錄看到 `data_embed_pt/` 和 `data_former_pt/` 兩個資料夾。
 
-執行以下指令來訓練第一階段的筆劃嵌入網路 (Embedding Network)。這個網路的目的是學習如何將筆劃圖像轉換為有意義的特徵向量。
+### 5. 訓練筆劃嵌入網路 (階段一)
 
-```bash
-python train_Embed.py --dbDir data_embed_pt --outDir result --status train
-```
-
-- `--dbDir`: 指定包含 `.pt` 檔案的資料夾。
-- `--outDir`: 指定儲存模型權重、日誌和結果的資料夾。
-- `--status`: 設定為 `train` 模式。
-
-訓練完成後，最佳的模型權重 (checkpoint) 將會儲存在 `result/` 資料夾下的子目錄中。
-
-### 步驟 4：訓練分割 Transformer (階段二)
-
-使用第一階段產生的權重來訓練第二階段的分割 Transformer。
+執行以下指令來訓練 `AutoencoderEmbed` 模型。
 
 ```bash
-python train_Segformer.py --dbDir data_former_pt --outDir result --status train --embed_ckpt path/to/your/embedding_model.pth
+python train_Embed.py --dbDir data_embed_pt_k_0001 --outDir result_embed --status train
 ```
 
-- `--embed_ckpt`: **(重要)** 請將此參數指向您在步驟 3 中儲存的最佳模型權重檔案的路徑（例如 `result/_2025.../checkpoints/model_step_150000.pth`）。
+訓練完成後，最佳的模型權重將儲存在 `result_embed/` 下的子目錄中（例如 `_2025.../checkpoints/best_acc_model.pth`）。
+
+<details>
+<summary><b>點此展開：進階選項 (續訓、測試等)</b></summary>
+
+- **從 Checkpoint 恢復訓練**:
+  ```bash
+  python train_Embed.py --dbDir data_embed_pt_k_0001 --outDir result_embed --status train --ckpt path/to/your/checkpoint.pth --cnt
+  ```
+- **測試模型性能**:
+  ```bash
+  python train_Embed.py --status test --ckpt path/to/your/best_model.pth
+  ```
+- **生成視覺化重建圖**:
+  ```bash
+  python train_Embed.py --status vis --ckpt path/to/your/best_model.pth
+  ```
+
+</details>
+
+### 6. 訓練分割 Transformer (階段二)
+
+使用第一階段產生的權重來訓練 `GpTransformer` 模型。
+
+```bash
+# (重要) 請務必將 --embed_ckpt 指向你在步驟 5 中得到的最佳模型權重
+python train_Segformer.py --dbDir data_former_pt --outDir result_segformer --status train --embed_ckpt result_embed/_.../checkpoints/best_acc_model.pth
+```
+
+<details>
+<summary><b>點此展開：進階選項 (續訓、測試等)</b></summary>
+
+- **從 Checkpoint 恢復訓練**:
+  ```bash
+  python train_Segformer.py --dbDir data_former_pt --outDir result_segformer --status train --embed_ckpt path/to/embed_model.pth --ckpt path/to/segformer_checkpoint.pth --cnt
+  ```
+- **測試模型性能**:
+  ```bash
+  python train_Segformer.py --status test --embed_ckpt path/to/embed_model.pth --ckpt path/to/your/best_segformer_model.pth
+  ```
+
+</details>
 
 ## 引用
 
