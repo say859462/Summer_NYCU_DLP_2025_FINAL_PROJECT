@@ -113,10 +113,6 @@ parser.add_argument("--seed", type=int, default=42, help="隨機種子")
 parser.add_argument("--val_metric", type=str, default="SAcc",
                     choices=["SAcc", "CAcc"], help="Plateau/最佳模型依據的驗證指標")
 parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss 的 gamma")
-parser.add_argument("--drop_rate", type=float, default=0.1, help="模型 dropout rate")
-
-parser.add_argument("--embed_ckpt", type=str, default="result/best.pth",
-                    help="預訓練 Embedding 模型路徑（log 中顯示你有載入）")
 
 
 # ====== 輔助函式 ======
