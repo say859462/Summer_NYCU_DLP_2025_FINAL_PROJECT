@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
+#!! 可能可以加resnet在GCN
+#iou in gnc可以調
 #enhanced features
 def build_overlap_graph(stroke_images, iou_thresh=0.1):
     """
@@ -91,6 +93,7 @@ class SeqSpaFusion(nn.Module):
             nn.ReLU(),
             nn.Linear(out_dim, out_dim)
         )
+        
 
     def forward(self, stroke_embeds, adj_matrix, mask = None):
         B, N, D = stroke_embeds.shape
@@ -101,11 +104,18 @@ class SeqSpaFusion(nn.Module):
 
         # Spatial encoding (message passing using adjacency)
         spa_feat = stroke_embeds
-        for layer in self.gcn_layers:
-            spa_feat = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
-            spa_feat = layer(spa_feat)
-            spa_feat = F.relu(spa_feat)
-        spa_feat = self.gcn_proj(spa_feat)      # (B, N, D)
+        for idx, layer in enumerate(self.gcn_layers):
+            agg = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
+            new_feat = layer(agg)
+
+            # residual connection
+            if new_feat.shape == spa_feat.shape:   # same dimension, safe residual
+                spa_feat = F.relu(new_feat + spa_feat)
+            else:
+                spa_feat = F.relu(new_feat)
+
+        # 🔹 always project back to d_model
+        spa_feat = self.gcn_proj(spa_feat)   # (B, N, 256)
 
         # Fusion
         fused = torch.cat([stroke_embeds, seq_feat, spa_feat], dim=-1)  # (B, N, 3D)
