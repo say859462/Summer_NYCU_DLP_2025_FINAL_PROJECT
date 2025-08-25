@@ -177,112 +177,63 @@ def loss_fn(real, pred, gamma=2.0):
 #enhanced features
 def build_overlap_graph(stroke_images, iou_thresh=0.1):
     """
-    Build adjacency matrix based on bounding box IoU of strokes.
-    
-    stroke_images: (N, H, W) binary masks for each stroke
-    returns: (N, N) adjacency matrix (0/1)
+    GPU-friendly version of overlap graph construction.
+    stroke_images: (N, H, W) binary masks for each stroke (torch.Tensor, device=GPU or CPU)
+    returns: (N, N) adjacency matrix (float32)
     """
     N, H, W = stroke_images.shape
-    boxes = []
+    device = stroke_images.device
 
-    # Step 1: bounding boxes
-    for i in range(N):
-        ys, xs = torch.where(stroke_images[i] > 0)
-        if len(xs) == 0 or len(ys) == 0:
-            boxes.append((0,0,0,0))  # empty stroke
-        else:
-            x_min, x_max = xs.min().item(), xs.max().item()
-            y_min, y_max = ys.min().item(), ys.max().item()
-            boxes.append((x_min, y_min, x_max, y_max))
+    # (N, H*W)
+    flat = stroke_images.view(N, -1).float()
 
-    # Step 2+3: IoU adjacency
-    adj = torch.zeros((N, N), dtype=torch.float32)
-    for i in range(N):
-        for j in range(N):
-            if i == j:
-                continue
-            xi1, yi1, xi2, yi2 = boxes[i]
-            xj1, yj1, xj2, yj2 = boxes[j]
+    # compute bounding boxes in vectorized form
+    ys, xs = torch.meshgrid(
+        torch.arange(H, device=device), torch.arange(W, device=device), indexing="ij"
+    )
+    ys, xs = ys.flatten(), xs.flatten()
 
-            # intersection
-            inter_x1, inter_y1 = max(xi1, xj1), max(yi1, yj1)
-            inter_x2, inter_y2 = min(xi2, xj2), min(yi2, yj2)
-            inter_area = max(0, inter_x2 - inter_x1 + 1) * max(0, inter_y2 - inter_y1 + 1)
+    # mask out non-stroke pixels
+    flat_mask = flat > 0
 
-            # union
-            area_i = (xi2 - xi1 + 1) * (yi2 - yi1 + 1)
-            area_j = (xj2 - xj1 + 1) * (yj2 - yj1 + 1)
-            union_area = area_i + area_j - inter_area
+    # min/max per stroke
+    x_min = torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, W, device=device)).min(dim=1).values
+    x_max = torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, 0, device=device)).max(dim=1).values
+    y_min = torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, H, device=device)).min(dim=1).values
+    y_max = torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, 0, device=device)).max(dim=1).values
 
-            iou = inter_area / union_area if union_area > 0 else 0.0
+    # empty strokes: fix invalid boxes
+    empty_mask = (x_min > x_max) | (y_min > y_max)
+    x_min[empty_mask] = 0
+    x_max[empty_mask] = 0
+    y_min[empty_mask] = 0
+    y_max[empty_mask] = 0
 
-            if iou > iou_thresh:
-                adj[i, j] = 1.0
+    # expand boxes for pairwise IoU (N,N)
+    xi1, yi1, xi2, yi2 = [x.unsqueeze(1) for x in [x_min, y_min, x_max, y_max]]
+    xj1, yj1, xj2, yj2 = [x.unsqueeze(0) for x in [x_min, y_min, x_max, y_max]]
 
-    # Step 4: add self-loops
-    adj += torch.eye(N)
+    inter_x1 = torch.max(xi1, xj1)
+    inter_y1 = torch.max(yi1, yj1)
+    inter_x2 = torch.min(xi2, xj2)
+    inter_y2 = torch.min(yi2, yj2)
+
+    inter_w = (inter_x2 - inter_x1 + 1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1 + 1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area_i = (xi2 - xi1 + 1) * (yi2 - yi1 + 1)
+    area_j = (xj2 - xj1 + 1) * (yj2 - yj1 + 1)
+    union_area = area_i + area_j - inter_area
+    iou = inter_area / union_area.clamp(min=1e-6)
+
+    # adjacency by threshold
+    adj = (iou > iou_thresh).float()
+
+    # add self-loops
+    adj.fill_diagonal_(1.0)
 
     return adj
-
-
-class SeqSpaFusion(nn.Module):
-    """
-    Sequential (BiLSTM) + Spatial (GCN) Encoder Fusion
-    Input:
-        stroke_embeds: (B, N, D)  # ordered stroke embeddings
-        adj_matrix: (B, N, N)     # overlap adjacency graph
-    Output:
-        enhanced_embeds: (B, N, D_out)
-    """
-
-    def __init__(self, d_model=256, hidden_size=128, gcn_hidden=128, out_dim=256, num_gcn_layers=2):
-        super(SeqSpaFusion, self).__init__()
-
-        # Sequential Encoder (BiLSTM)
-        self.lstm = nn.LSTM(
-            input_size=d_model,
-            hidden_size=hidden_size,
-            bidirectional=True,
-            batch_first=True
-        )
-        self.seq_proj = nn.Linear(hidden_size * 2, d_model)
-
-        # Spatial Encoder (GCN)
-        self.gcn_layers = nn.ModuleList([
-            nn.Linear(d_model if i == 0 else gcn_hidden, gcn_hidden)
-            for i in range(num_gcn_layers)
-        ])
-        self.gcn_proj = nn.Linear(gcn_hidden, d_model)
-
-        # Fusion MLP
-        fusion_in_dim = d_model * 3   # original + seq + spa
-        self.mlp = nn.Sequential(
-            nn.Linear(fusion_in_dim, out_dim),
-            nn.ReLU(),
-            nn.Linear(out_dim, out_dim)
-        )
-
-    def forward(self, stroke_embeds, adj_matrix):
-        B, N, D = stroke_embeds.shape
-
-        # Sequential encoding (temporal order preserved)
-        seq_out, _ = self.lstm(stroke_embeds)   # (B, N, 2*hidden)
-        seq_feat = self.seq_proj(seq_out)       # (B, N, D)
-
-        # Spatial encoding (message passing using adjacency)
-        spa_feat = stroke_embeds
-        for layer in self.gcn_layers:
-            spa_feat = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
-            spa_feat = layer(spa_feat)
-            spa_feat = F.relu(spa_feat)
-        spa_feat = self.gcn_proj(spa_feat)      # (B, N, D)
-
-        # Fusion
-        fused = torch.cat([stroke_embeds, seq_feat, spa_feat], dim=-1)  # (B, N, 3D)
-        enhanced = self.mlp(fused)                                      # (B, N, D_out)
-
-        return enhanced
-
 # =============================================================================
 
 
@@ -343,6 +294,7 @@ def cook_raw(batch_data):
     input_raw, glabel_raw = input_raw.to(device), glabel_raw.to(device)
     batch_size = input_raw.shape[0]
     input_embeddings, target_embeddings = [], []
+    adj_matrices = []
     for i in range(batch_size):
         single_input_strokes = (
             input_raw[i, :, :, : nb_strokes[i]].permute(2, 0, 1).unsqueeze(1)
@@ -354,25 +306,33 @@ def cook_raw(batch_data):
         stroke_masks = input_raw[i, :, :, : nb_strokes[i]].permute(2, 0, 1)  # (N,H,W)
         adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1)       # (N,N)
         adj_matrix = adj_matrix.to(stroke_embeds.device)
-
-        # ---- fuse with SeqSpaFusion ----
-        stroke_embeds = seqspa_fusion(
-            stroke_embeds.unsqueeze(0),      # (1,N,D)
-            adj_matrix.unsqueeze(0)          # (1,N,N)
-        ).squeeze(0)                         # (N,D_out)
+        adj_matrices.append(adj_matrix)
         input_embeddings.append(stroke_embeds)
         grouped_imgs = group_images(input_raw[i, :, :, : nb_strokes[i]], single_labels)
         group_embeds = de_modelAESSG.encode(grouped_imgs.unsqueeze(1))
         start_token = torch.full((1, group_embeds.shape[1]), -1.0, device=device)
         target_embeds_with_start = torch.cat([start_token, group_embeds], dim=0)
         target_embeddings.append(target_embeds_with_start)
+    # Pad adjacency matrices to max_strokes in batch
+    max_strokes = max(m.shape[0] for m in adj_matrices)
+    padded_adj = []
+    mask = torch.zeros(batch_size, max_strokes, device=device)
+
+    for i,adj in enumerate(adj_matrices):
+        N = adj.shape[0]
+        pad = torch.zeros(max_strokes, max_strokes, device=adj.device)
+        pad[:N, :N] = adj
+        padded_adj.append(pad)
+
+        mask[i, :N] = 1.0
+    padded_adj = torch.stack(padded_adj, dim=0)   # (B, Nmax, Nmax)
     padded_input_embeds = nn.utils.rnn.pad_sequence(
         input_embeddings, batch_first=True, padding_value=-2.0
     )
     padded_target_embeds = nn.utils.rnn.pad_sequence(
         target_embeddings, batch_first=True, padding_value=-2.0
     )
-    return padded_input_embeds, padded_target_embeds, glabel_raw
+    return padded_input_embeds, padded_target_embeds, glabel_raw, padded_adj, mask
 
 
 def generate_grouped_image(stroke_images, group_labels):
@@ -470,8 +430,12 @@ def test_autoregre_step(batch_data):
         nb_max_try = nb_gps[0] if nb_gps[0] > 0 else hyper_params["num_of_group"]
         for _ in range(int(nb_max_try)):
             enc_mask, combined_mask, dec_mask = create_masks(inp_embed, gp_token)
+            stroke_masks = input_raw[0, :, :, : nb_strokes[0]].permute(2, 0, 1)
+            adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1).unsqueeze(0).to(device)
+            B, N = inp_embed.shape[0], stroke_masks.shape[0]
+            mask = torch.ones(B, N, device=device)
             predictions, _ = transformer(
-                inp_embed, gp_token, enc_mask, combined_mask, dec_mask
+                inp_embed, adj_matrix, mask, gp_token, enc_mask, combined_mask, dec_mask
             )
             last_pred = predictions[:, -1:, :]
             all_predictions.append(last_pred)
@@ -527,7 +491,7 @@ def train_net():
             batch_data = next(train_iter)
 
         transformer.train()
-        inp_embed, tar_embed, labels = cook_raw(batch_data)
+        inp_embed, tar_embed, labels, adj_matrix, mask = cook_raw(batch_data)
 
         # 獲取目標序列長度（不包括start token）
         target_seq_len = tar_embed.shape[1] - 1  # 減去start token
@@ -558,7 +522,7 @@ def train_net():
                     inp_embed, decoder_input
                 )
                 predictions, _ = transformer(
-                    inp_embed, decoder_input, enc_mask, combined_mask, dec_mask
+                    inp_embed, adj_matrix, mask, decoder_input, enc_mask, combined_mask, dec_mask
                 )
 
                 # 獲取最後一個預測
@@ -607,7 +571,7 @@ def train_net():
         enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
 
         predictions, _ = transformer(
-            inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
+            inp_embed, adj_matrix, mask, tar_for_input, enc_mask, combined_mask, dec_mask
         )
 
         # 確保predictions和labels的形狀完全一致
@@ -857,7 +821,6 @@ if __name__ == "__main__":
         pe_target=64,
         rate=hyper_params["drop_rate"],
     ).to(device)
-    seqspa_fusion = SeqSpaFusion(d_model=hyper_params["d_model"]).to(device)
     optimizer = optim.Adam(
         transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
     )
