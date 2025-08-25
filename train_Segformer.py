@@ -44,7 +44,7 @@ parser.add_argument(
     "--embed_ckpt",
     help="預訓練 Embedding Autoencoder 的 .pth checkpoint 路徑",
     type=str,
-    default="Embedding_Network_Model_Weight.pth",
+    default="result\\best.pth",
 )
 parser.add_argument(
     "--ckpt",
@@ -59,7 +59,7 @@ parser.add_argument(
     "--accum_steps",
     help="梯度累積步數，等效 batch size = batchSize * accum_steps",
     type=int,
-    default=4,
+    default=1,
 )
 parser.add_argument("--lr", help="學習率", type=float, default=1e-4)
 parser.add_argument("--d_model", help="模型的特徵維度", type=int, default=256)
@@ -71,10 +71,22 @@ parser.add_argument(
     "--num_of_group", help="資料集中的最大群組數量", type=int, default=4
 )
 parser.add_argument(
+    "--teacher_forcing_start", help="Teacher forcing 起始比例", type=float, default=1.0
+)
+parser.add_argument(
+    "--teacher_forcing_end", help="Teacher forcing 結束比例", type=float, default=0.2
+)
+parser.add_argument(
+    "--teacher_forcing_decay_steps",
+    help="Teacher forcing 衰減步數",
+    type=int,
+    default=100000,
+)
+parser.add_argument(
     "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=100
 )
 parser.add_argument(
-    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=1000
+    "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=2000
 )
 parser.add_argument(
     "--saveModelStep", help="每隔多少步儲存一次模型", type=int, default=5000
@@ -98,67 +110,68 @@ def create_masks(inp, tar):
     combined_mask = tar_padding_mask | look_ahead_mask
     return enc_padding_mask, combined_mask, dec_padding_mask
 
-# Source code loss function
-def loss_fn(real, pred):
+
+def get_teacher_forcing_ratio(step, start_ratio, end_ratio, decay_steps):
+    """
+    根據訓練步數計算當前的 teacher forcing ratio
+    論文提到從 100% 逐漸衰減到 20%
+    """
+    if step >= decay_steps:
+        return end_ratio
+
+    # 線性衰減
+    decay_factor = step / decay_steps
+    current_ratio = start_ratio - (start_ratio - end_ratio) * decay_factor
+    return current_ratio
+
+
+def loss_fn(real, pred, gamma=2.0):
+    """
+    計算 Focal Loss。
+    根據論文 Eq. 6，gamma 值預設為 2.0。
+    """
+    # 步驟 1: 建立遮罩 (mask)，忽略填充值 (-1.0)，這部分與原始程式碼相同
     mask = (real != -1.0).float()
+
+    # 步驟 2: 計算標準的 BCE Loss (但不進行 reduction)
+    # F.binary_cross_entropy_with_logits 包含了 sigmoid 操作，更穩定
     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
-    loss = bce_loss * mask
 
+    # 步驟 3: 計算 Focal Loss 的調變因子 (modulating factor)
+    # 首先取得預測機率 p
+    p = torch.sigmoid(pred)
+    # 根據真實標籤計算 p_t
+    p_t = p * real + (1 - p) * (1 - real)
+    # 調變因子為 (1 - p_t)^gamma
+    modulating_factor = (1.0 - p_t).pow(gamma)
+
+    # 步驟 4: 計算最終的 Focal Loss
+    # 將 BCE Loss 與調變因子相乘
+    focal_loss = modulating_factor * bce_loss
+
+    # 步驟 5: 應用遮罩並計算平均損失
+    masked_loss = focal_loss * mask
     nb_elem = torch.sum(mask)
-    loss_val = torch.sum(loss) / nb_elem
+    if nb_elem == 0:  # 避免除以零
+        loss_val = torch.tensor(0.0).to(pred.device)
+    else:
+        loss_val = torch.sum(masked_loss) / nb_elem
 
-    pred_sigmoid = torch.sigmoid(pred)
-    pred_sigmoid_masked = torch.round(pred_sigmoid) * mask
-    real_masked = real * mask
-    acc_val = 1.0 - (torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem)
+    # --- 準確率計算部分保持不變 ---
+    with torch.no_grad():  # 準確率計算不應影響梯度
+        pred_sigmoid = torch.sigmoid(pred)
+        pred_sigmoid_masked = torch.round(pred_sigmoid) * mask
+        real_masked = real * mask
+
+        if nb_elem == 0:
+            acc_val = torch.tensor(1.0).to(pred.device)
+        else:
+            acc_val = 1.0 - (
+                torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem
+            )
 
     return loss_val, acc_val
 
-
-# def loss_fn(real, pred, gamma=2.0):
-#     """
-#     計算 Focal Loss。
-#     根據論文 Eq. 6，gamma 值預設為 2.0。
-#     """
-#     # 步驟 1: 建立遮罩 (mask)，忽略填充值 (-1.0)，這部分與原始程式碼相同
-#     mask = (real != -1.0).float()
-
-#     # 步驟 2: 計算標準的 BCE Loss (但不進行 reduction)
-#     # F.binary_cross_entropy_with_logits 包含了 sigmoid 操作，更穩定
-#     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
-
-#     # 步驟 3: 計算 Focal Loss 的調變因子 (modulating factor)
-#     # 首先取得預測機率 p
-#     p = torch.sigmoid(pred)
-#     # 根據真實標籤計算 p_t
-#     p_t = p * real + (1 - p) * (1 - real)
-#     # 調變因子為 (1 - p_t)^gamma
-#     modulating_factor = (1.0 - p_t).pow(gamma)
-
-#     # 步驟 4: 計算最終的 Focal Loss
-#     # 將 BCE Loss 與調變因子相乘
-#     focal_loss = modulating_factor * bce_loss
-
-#     # 步驟 5: 應用遮罩並計算平均損失
-#     masked_loss = focal_loss * mask
-#     nb_elem = torch.sum(mask)
-#     if nb_elem == 0: # 避免除以零
-#         loss_val = torch.tensor(0.0).to(pred.device)
-#     else:
-#         loss_val = torch.sum(masked_loss) / nb_elem
-
-#     # --- 準確率計算部分保持不變 ---
-#     with torch.no_grad(): # 準確率計算不應影響梯度
-#         pred_sigmoid = torch.sigmoid(pred)
-#         pred_sigmoid_masked = torch.round(pred_sigmoid) * mask
-#         real_masked = real * mask
-
-#         if nb_elem == 0:
-#             acc_val = torch.tensor(1.0).to(pred.device)
-#         else:
-#             acc_val = 1.0 - (torch.sum(torch.abs(pred_sigmoid_masked - real_masked)) / nb_elem)
-
-#     return loss_val, acc_val
 
 # =============================================================================
 
@@ -309,6 +322,11 @@ def train_net():
     step = hyper_params.get("start_step", 0)
     accumulation_steps = hyper_params.get("accum_steps", 1)
 
+    # Teacher forcing 參數
+    tf_start = hyper_params.get("teacher_forcing_start", 1.0)
+    tf_end = hyper_params.get("teacher_forcing_end", 0.2)
+    tf_decay_steps = hyper_params.get("teacher_forcing_decay_steps", 100000)
+
     best_sacc = 0.0
     best_cacc = 0.0
     best_score_sum = 0.0
@@ -332,18 +350,77 @@ def train_net():
 
         transformer.train()
         inp_embed, tar_embed, labels = cook_raw(batch_data)
-        tar_for_input = tar_embed[:, :-1, :]
+
+        # 獲取當前 teacher forcing ratio
+        tf_ratio = get_teacher_forcing_ratio(step, tf_start, tf_end, tf_decay_steps)
+
+        # 決定是否使用 teacher forcing
+        use_teacher_forcing = True
+        if tf_ratio < 1.0:  # 只有在需要混合時才進行
+            use_teacher_forcing = torch.rand(1).item() < tf_ratio
+
+        if use_teacher_forcing:
+            # 使用 ground truth 作為 decoder 輸入
+            tar_for_input = tar_embed[:, :-1, :]
+        else:
+            # 使用模型預測作為 decoder 輸入 (auto-regressive)
+            # 這裡需要模擬推理時的 auto-regressive 過程
+            batch_size = inp_embed.shape[0]
+            max_groups = tar_embed.shape[1] - 1  # 減去 start token
+
+            # 初始化 decoder 輸入 (只有 start token)
+            decoder_input = tar_embed[:, :1, :]  # start token
+
+            # 逐步生成 group tokens
+            for group_idx in range(max_groups):
+                enc_mask, combined_mask, dec_mask = create_masks(
+                    inp_embed, decoder_input
+                )
+                predictions, _ = transformer(
+                    inp_embed, decoder_input, enc_mask, combined_mask, dec_mask
+                )
+
+                # 獲取最後一個預測
+                last_pred = predictions[:, -1:, :]
+                pred_labels = torch.round(torch.sigmoid(last_pred))
+
+                # 根據預測生成對應的 group embedding
+                # 這裡需要根據 pred_labels 生成對應的 group 影像並編碼
+                group_embeddings = []
+                for i in range(batch_size):
+                    # 獲取當前樣本的原始筆劃數
+                    num_original_strokes = batch_data[2][i]
+
+                    # 從原始輸入中提取 strokes
+                    stroke_images = batch_data[0][i, :, :, :num_original_strokes].to(
+                        device
+                    )
+
+                    # 將預測標籤裁剪到原始筆劃數，避免越界
+                    valid_pred_labels = pred_labels[i][:, :num_original_strokes]
+
+                    # 根據【裁剪後】的預測標籤生成 group 影像
+                    grouped_img = group_images(stroke_images, valid_pred_labels)
+                    # 編碼 group 影像
+                    group_embed = de_modelAESSG.encode(grouped_img.unsqueeze(1))
+                    group_embeddings.append(group_embed)
+
+                # 拼接 group embeddings
+                new_tokens = torch.stack(group_embeddings, dim=0)
+                decoder_input = torch.cat([decoder_input, new_tokens], dim=1)
+
+            tar_for_input = decoder_input
+
         enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
 
         predictions, _ = transformer(
             inp_embed, tar_for_input, enc_mask, combined_mask, dec_mask
         )
-
-        # =====================================================================
-        # MODIFIED: 使用 Focal Loss (gamma=2.0)
-        # =====================================================================
-        loss, acc = loss_fn(labels, predictions, gamma=2.0)
-        # =====================================================================
+        # 在自迴歸模式下，預測序列會比標籤序列多一個，我們需要將其裁切掉
+        if predictions.shape[1] > labels.shape[1]:
+            predictions = predictions[:, : labels.shape[1], :]
+        # 使用 Focal Loss (gamma=2.0)
+        loss, acc = loss_fn(labels, predictions)
 
         loss = loss / accumulation_steps
         loss.backward()
@@ -356,11 +433,17 @@ def train_net():
             sacc_val = sacc(torch.sigmoid(predictions), labels)
             cacc_val = cacc(torch.sigmoid(predictions), labels)
             logger.info(
-                f"步驟 [{step}/{hyper_params['maxIter']}], 損失: {loss.item() * accumulation_steps:.6f}, Acc: {acc.item():.6f}, SAcc: {sacc_val.item():.6f}, CAcc: {cacc_val:.6f}"
+                f"步驟 [{step}/{hyper_params['maxIter']}], "
+                f"損失: {loss.item() * accumulation_steps:.6f}, "
+                f"Acc: {acc.item():.6f}, "
+                f"SAcc: {sacc_val.item():.6f}, "
+                f"CAcc: {cacc_val:.6f}, "
+                f"TF Ratio: {tf_ratio:.3f}"
             )
             writer.add_scalar("Loss/train", loss.item() * accumulation_steps, step)
             writer.add_scalar("SAcc/train", sacc_val.item(), step)
             writer.add_scalar("CAcc/train", cacc_val, step)
+            writer.add_scalar("Teacher_Forcing_Ratio", tf_ratio, step)
 
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
@@ -421,6 +504,7 @@ def train_net():
                         "step": step,
                         "model_state_dict": transformer.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
+                        "teacher_forcing_ratio": tf_ratio,
                     },
                     ckpt_path,
                 )
@@ -524,7 +608,10 @@ if __name__ == "__main__":
     if hyper_params["status"] == "train":
         train_loader = DataLoader(
             GPRegDataset(
-                data_dir=hyper_params["dbDir"], raw_size=[256, 256], prefix="train"
+                data_dir=hyper_params["dbDir"],
+                raw_size=[256, 256],
+                prefix="train",
+                augment=True,
             ),
             batch_size=hyper_params["batchSize"],
             shuffle=True,

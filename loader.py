@@ -28,8 +28,8 @@ class StrokeAugmentation:
                     rotate=(-15, 15),  # 旋轉：-15°到+15°
                     shear=(-5, 5),  # 輕微剪切保持流暢性
                     interpolation=Image.NEAREST,  # 最近鄰插值
-                    mask_value=0,  # 修正：使用 mask_value 代替 cval
-                    p=0.8,  # 應用概率
+                    cval=0,  # 修正：使用 mask_value 代替 cval
+                    p=0.5,  # 應用概率
                 )
             ],
             is_check_shapes=False,
@@ -65,12 +65,12 @@ class SketchAugmentation:
         self.geometric_augmentation = A.Compose(
             [
                 A.Affine(
-                    scale=(0.7, 1.3),  # 縮放：0.7-1.3倍
+                    scale=(0.8, 1.2),  # 縮放：0.7-1.3倍
                     translate_percent=(-0.15, 0.15),  # 平移：±15%
-                    rotate=(-30, 30),  # 旋轉：-30°到+30°
+                    rotate=(-15, 15),  # 旋轉：-30°到+30°
                     shear=(-10, 10),  # 輕微剪切
                     interpolation=Image.NEAREST,
-                    mask_value=0,  # 修正：使用 mask_value
+                    cval=0,  # 修正：使用 mask_value
                     p=1.0,  # 總是應用幾何變換
                 )
             ],

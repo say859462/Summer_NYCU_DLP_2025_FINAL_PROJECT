@@ -44,47 +44,36 @@ hyper_params = {
 # =============================================================================
 # 核心損失函數 統一傳入logits 針對不同loss function再去做預處理
 # =============================================================================
-# def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, gamma=0.5):
-#     """計算訓練時的總損失 (參照論文 Eq. 2, 3, 4)"""
-#     # 對 logits 進行預處理
-#     recon_pred = torch.sigmoid(recon_logits)
-#     dist_pred = torch.sigmoid(dist_logits)
-
-#     # 計算損失
-#     recon_loss = nn.MSELoss()(recon_pred, labels)
-#     dist_loss = nn.MSELoss()(dist_pred, dist_labels)
-
-#     loss = recon_loss + gamma * dist_loss
-#     return loss, recon_loss, dist_loss
-
-
-def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, alpha=0.8):
-
-    recon_loss = nn.BCEWithLogitsLoss()(recon_logits, labels)
-
-    # 2. 距離場損失 (pre_loss)
-    # 原始碼中的 dis_map 是已經 sigmoid 過的預測圖，所以這裡我們也對 logits 做 sigmoid
+# Paper loss
+def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, gamma=0.5):
+    """計算訓練時的總損失 (參照論文 Eq. 2, 3, 4)"""
+    # 對 logits 進行預處理
+    recon_pred = torch.sigmoid(recon_logits)
     dist_pred = torch.sigmoid(dist_logits)
+
+    # 計算損失
+    recon_loss = nn.MSELoss()(recon_pred, labels)
     dist_loss = nn.MSELoss()(dist_pred, dist_labels)
 
-    # 3. 總損失 (loss)
-    # 按照原始碼的 alpha 加權方式
-    total_loss = alpha * recon_loss + (1 - alpha) * dist_loss
+    loss = recon_loss + gamma * dist_loss
+    return loss, recon_loss, dist_loss
 
-    # --- 準確率計算 ---
 
-    # 4. 重建準確率 (train_cons_acc)
-    # tf.keras.metrics.binary_accuracy 的 PyTorch 實現
-    with torch.no_grad():  # 準確率計算不應影響梯度
-        recon_pred_binary = torch.sigmoid(recon_logits) > 0.5
-        labels_binary = labels > 0.5
-        recon_acc = (recon_pred_binary == labels_binary).float().mean()
+# Paper source code loss
+# def loss_fn_for_train(recon_logits, labels, dist_logits, dist_labels, alpha=0.8):
 
-    # 5. 距離場 "準確率" (train_pre_acc)
-    # 原始碼直接使用 MSE 作為指標，我們也回傳 dist_loss 的值
-    dist_acc_mse = dist_loss
+#     recon_loss = nn.BCEWithLogitsLoss()(recon_logits, labels)
 
-    return total_loss, recon_loss, dist_loss
+#     # 2. 距離場損失 (pre_loss)
+#     # 原始碼中的 dis_map 是已經 sigmoid 過的預測圖，所以這裡我們也對 logits 做 sigmoid
+#     dist_pred = torch.sigmoid(dist_logits)
+#     dist_loss = nn.MSELoss()(dist_pred, dist_labels)
+
+#     # 3. 總損失 (loss)
+#     # 按照原始碼的 alpha 加權方式
+#     total_loss = alpha * recon_loss + (1 - alpha) * dist_loss
+
+#     return total_loss, recon_loss, dist_loss
 
 
 def loss_fn_for_eval(recon_pred, labels):
@@ -114,7 +103,7 @@ def train_net(logger, output_folder, device):
             hyper_params["dbDir"],
             [hyper_params["imgSize"], hyper_params["imgSize"]],
             "train",
-            augment=True,
+            augment=False,
         )
         valid_dataset = AeDataset(
             hyper_params["dbDir"],
@@ -625,7 +614,7 @@ if __name__ == "__main__":
         choices=["train", "test", "vis", "codeItp", "tripleItp", "white_image"],
     )
     parser.add_argument(
-        "--dbDir", help="database directory", type=str, default="data_embed_pt_k_001"
+        "--dbDir", help="database directory", type=str, default="data_embed_pt_k_0001"
     )
     parser.add_argument("--outDir", help="output directory", type=str, default="result")
     args = parser.parse_args()

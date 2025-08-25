@@ -119,6 +119,8 @@ def process_and_write_data(dataset, subset_path, subset_name):
         nb_group = max(valid_group_ids) + 1
 
         index_group = find_duplicate_indices(group_id, nb_group)
+
+        # 4. 使用排序後的 group 資訊來建立 glabel
         glabel = np.zeros((nb_group, nb_stroke), dtype=np.int64)
         for row, row_indices in enumerate(index_group):
             for col in row_indices:
@@ -152,13 +154,13 @@ def process_and_write_data(dataset, subset_path, subset_name):
             # stroke_distance_fields.append(distance_field)
 
         img_raw_np = np.stack(stroke_images, axis=-1)
-        edis_raw_np = np.stack(stroke_distance_fields, axis=-1)
+        # edis_raw_np = np.stack(stroke_distance_fields, axis=-1)
 
         # 儲存的字典包含圖像、距離場、標籤和類別
         data_to_save = {
             "img_raw": torch.from_numpy(img_raw_np).float(),
             "glabel_raw": torch.from_numpy(glabel).long(),
-            # "category": category_name,  
+            # "category": category_name,
         }
 
         torch.save(data_to_save, os.path.join(subset_path, f"{idx}.pt"))
