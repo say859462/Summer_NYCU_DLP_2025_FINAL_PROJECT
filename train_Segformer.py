@@ -17,7 +17,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-# 從您提供的 PyTorch 檔案中匯入模組
+# 從您提供的 PyTorch 檔案中匯入模듈
 from loader import GPRegDataset, gpreg_collate_fn
 from network import GpTransformer, AutoencoderEmbed
 
@@ -84,7 +84,7 @@ parser.add_argument(
     default=50000,
 )
 parser.add_argument(
-    "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=1000
+    "--dispLossStep", help="每隔多少步顯示一次日誌", type=int, default=200
 )
 parser.add_argument(
     "--exeValStep", help="每隔多少步驗證一次模型", type=int, default=1000
@@ -384,9 +384,10 @@ def train_net():
     tf_end = hyper_params.get("teacher_forcing_end", 0.2)
     tf_decay_steps = hyper_params.get("teacher_forcing_decay_steps", 100000)
 
-    best_sacc = 0.0
-    best_cacc = 0.0
-    best_score_sum = 0.0
+    # 從 checkpoint 恢復最佳分數，如果有的話
+    best_score_sum = hyper_params.get("best_score_sum", 0.0)
+    if best_score_sum > 0:
+        logger.info(f"從 checkpoint 恢復最佳分數: {best_score_sum:.6f}")
 
     if accumulation_steps > 1:
         logger.info(f"啟用梯度累積，步數為: {accumulation_steps}")
@@ -422,7 +423,6 @@ def train_net():
         if use_teacher_forcing:
             # 使用 ground truth 作為 decoder 輸入
             tar_for_input = tar_embed[:, :-1, :]  # 移除最後一個token作為輸入
-            # 預期的輸出應該是tar_embed[:, 1:, :]，但我們直接使用labels
         else:
             # 使用模型預測作為 decoder 輸入 (auto-regressive)
             batch_size = inp_embed.shape[0]
@@ -515,6 +515,8 @@ def train_net():
         if step % hyper_params["dispLossStep"] == 0:
             sacc_val = sacc(torch.sigmoid(predictions), labels_trimmed)
             cacc_val = cacc(torch.sigmoid(predictions), labels_trimmed)
+            # 獲取當前學習率
+            current_lr = optimizer.param_groups[0]["lr"]
             logger.info(
                 f"步驟 [{step}/{hyper_params['maxIter']}], "
                 f"損失: {loss.item() * accumulation_steps:.6f}, "
@@ -522,13 +524,14 @@ def train_net():
                 f"SAcc: {sacc_val.item():.6f}, "
                 f"CAcc: {cacc_val:.6f}, "
                 f"TF Ratio: {tf_ratio:.3f}, "
+                f"LR: {current_lr:.1e}"
             )
             writer.add_scalar("Loss/train", loss.item() * accumulation_steps, step)
             writer.add_scalar("SAcc/train", sacc_val.item(), step)
             writer.add_scalar("CAcc/train", cacc_val, step)
             writer.add_scalar("Teacher_Forcing_Ratio", tf_ratio, step)
+            writer.add_scalar("Learning_Rate", current_lr, step)
 
-        # ... rest of validation and saving code remains the same
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
             test_iter = iter(test_loader)
@@ -557,11 +560,10 @@ def train_net():
                             torch.round(torch.sigmoid(final_predictions_val[0])),
                         )
 
-                        # 確保轉 numpy + uint8
                         def to_uint8(img):
                             if torch.is_tensor(img):
                                 img = img.detach().cpu().numpy()
-                            if img.max() <= 1.0:  # 假設是 0~1 範圍
+                            if img.max() <= 1.0:
                                 img = (img * 255).astype(np.uint8)
                             else:
                                 img = img.astype(np.uint8)
@@ -601,10 +603,12 @@ def train_net():
             writer.add_scalar("CAcc/validation", avg_cacc, step)
 
             current_score_sum = avg_sacc + avg_cacc
+
+            # 將當前的驗證分數傳給 scheduler
+            scheduler.step(current_score_sum)
+
             if current_score_sum > best_score_sum:
                 best_score_sum = current_score_sum
-                best_sacc = avg_sacc
-                best_cacc = avg_cacc
 
                 best_model_path = os.path.join(
                     output_folder, "checkpoints", "best_model.pth"
@@ -615,13 +619,14 @@ def train_net():
                         "step": step,
                         "model_state_dict": transformer.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
-                        "sacc": best_sacc,
-                        "cacc": best_cacc,
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "teacher_forcing_ratio": tf_ratio,
+                        "best_score_sum": best_score_sum,
                     },
                     best_model_path,
                 )
                 logger.info(
-                    f"*** 新的最佳模型已儲存至 {best_model_path}！ SAcc: {best_sacc:.6f}, CAcc: {best_cacc:.6f} ***"
+                    f"*** 新的最佳模型已儲存至 {best_model_path}！ Score Sum: {best_score_sum:.6f} (SAcc: {avg_sacc:.6f}, CAcc: {avg_cacc:.6f}) ***"
                 )
 
             if step % hyper_params["saveModelStep"] == 0 and step > 0:
@@ -634,7 +639,9 @@ def train_net():
                         "step": step,
                         "model_state_dict": transformer.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
                         "teacher_forcing_ratio": tf_ratio,
+                        "best_score_sum": best_score_sum,
                     },
                     ckpt_path,
                 )
@@ -677,10 +684,7 @@ def test_net():
                 gt_vis_img, os.path.join(img_folder, f"{test_itr}_g_label.jpeg")
             )
             save_image_safe(
-                pred_vis_img,
-                os.path.join(
-                    pred_vis_img, os.path.join(img_folder, f"{test_itr}_g_pred.jpeg")
-                ),
+                pred_vis_img, os.path.join(img_folder, f"{test_itr}_g_pred.jpeg")
             )
             test_itr += 1
         except StopIteration:
@@ -734,11 +738,11 @@ if __name__ == "__main__":
         rate=hyper_params["drop_rate"],
     ).to(device)
     optimizer = optim.Adam(
-        transformer.parameters(),
-        lr=hyper_params["lr"],
-        betas=(0.9, 0.98),
-        eps=1e-9,
-        weight_decay=1e-5,
+        transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
+    )
+
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=10
     )
 
     logger.info("正在準備資料載入器...")
@@ -783,7 +787,12 @@ if __name__ == "__main__":
         transformer.load_state_dict(checkpoint["model_state_dict"])
         if hyper_params["status"] == "train" and hyper_params["cnt"]:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                logger.info("成功恢復 Scheduler 狀態。")
             hyper_params["start_step"] = checkpoint.get("step", 0)
+            # 將 best_score_sum 也恢復，以確保 scheduler 和 best model 儲存邏輯的連續性
+            hyper_params["best_score_sum"] = checkpoint.get("best_score_sum", 0.0)
             logger.info(f"成功恢復訓練，從步驟 {hyper_params['start_step']} 開始。")
 
     if hyper_params["status"] == "train":

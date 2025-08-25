@@ -103,7 +103,7 @@ def train_net(logger, output_folder, device):
             hyper_params["dbDir"],
             [hyper_params["imgSize"], hyper_params["imgSize"]],
             "train",
-            augment=False,
+            augment=True,
         )
         valid_dataset = AeDataset(
             hyper_params["dbDir"],
@@ -129,11 +129,16 @@ def train_net(logger, output_folder, device):
         train_logger.error(f"資料載入失敗: {e}")
         return
 
-    optimizer = optim.Adam(model.parameters(), lr=hyper_params["lr"], weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=hyper_params["lr"])
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     ckpt_dir = os.path.join(output_folder, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
-
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",  # 監控的指標越小越好 (我們要監控 loss)
+        factor=0.5,  # 當指標不再改善時，將學習率乘以 0.5
+        patience=5,  # 連續 5 次驗證 (5 * 5000 steps) 指標沒有改善，就降低學習率
+    )
     # 建立用於儲存驗證預覽圖的資料夾
     preview_dir = os.path.join(output_folder, "validation_previews")
     os.makedirs(preview_dir, exist_ok=True)
@@ -154,6 +159,9 @@ def train_net(logger, output_folder, device):
         checkpoint = torch.load(hyper_params["ckpt"])
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:  # <--- 新增
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])  # <--- 新增
+            logger.info("成功恢復 Scheduler 狀態。")  # <--- 新增
         start_step = checkpoint.get("step", 0)
         # 恢復最佳指標（如果存在）
         best_val_loss = checkpoint.get("best_val_loss", float("inf"))
@@ -192,14 +200,16 @@ def train_net(logger, output_folder, device):
         optimizer.step()
 
         if step % hyper_params["dispLossStep"] == 0:
+            current_lr = optimizer.param_groups[0]["lr"]
             train_logger.info(
                 f"步驟 [{step}/{hyper_params['maxIter']}], 總損失: {loss.item():.6f}, "
                 f"重建損失: {cons_loss.item():.6f}, 距離場損失: {pre_loss.item():.6f}"
+                f"LR: {current_lr:.1e}"
             )
             writer.add_scalar("Loss/train_total", loss.item(), step)
             writer.add_scalar("Loss/train_reconstruction", cons_loss.item(), step)
             writer.add_scalar("Loss/train_distance_field", pre_loss.item(), step)
-
+            writer.add_scalar("Learning_Rate", current_lr, step)
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             model.eval()
             total_val_loss, total_val_acc = 0.0, 0.0
@@ -231,6 +241,7 @@ def train_net(logger, output_folder, device):
 
             avg_val_loss = total_val_loss / len(valid_loader)
             avg_val_acc = total_val_acc / len(valid_loader)
+            scheduler.step(avg_val_loss)
             writer.add_scalar("Loss/validation", avg_val_loss, step)
             writer.add_scalar("Accuracy/validation", avg_val_acc, step)
             train_logger.info(
@@ -290,6 +301,7 @@ def train_net(logger, output_folder, device):
                     "step": step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "best_val_loss": best_val_loss,
                     "best_val_acc": best_val_acc,
                     "best_loss_step": best_loss_step,
