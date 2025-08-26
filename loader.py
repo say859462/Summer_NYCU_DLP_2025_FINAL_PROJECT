@@ -11,6 +11,9 @@ from PIL import Image
 # --- 關鍵修正：確保匯入 ReplayCompose ---
 from albumentations.core.composition import ReplayCompose
 
+# * copy_paste
+from sa_copy_paste import sa_copy_paste_apply
+
 loader_logger = logging.getLogger("main.loader")
 
 
@@ -138,13 +141,32 @@ class SketchAugmentation:
 class AeDataset(Dataset):
     """用於 Autoencoder 訓練的 PyTorch Dataset。"""
 
-    def __init__(self, data_dir, raw_size, prefix, augment=False):
+    def __init__(self, data_dir, raw_size, prefix, augment=False,
+                 # --- NEW: inter-sketch SA copy-paste controls ---
+                 sa_copy_paste=False,     # 開關（預設關）
+                 sa_cp_prob=0.50,         # 觸發機率
+                 sa_cp_min_comp_px=20,    # 最小元件像素數
+                 sa_cp_max_overlap=0.30,  # 與既有筆畫可容忍最大重疊比例
+                 sa_cp_max_trials=10,     # 嘗試放置位置次數
+                 sa_cp_same_class_only=False,  # 僅同類別間貼（用資料夾名推類別）
+                 get_class_id=None,       # 可選：path -> class_id
+                 ):
         super().__init__()
         self.raw_size = raw_size
         self.augment = augment
         self.stroke_aug = StrokeAugmentation(
             apply_prob=0.5 if augment else 0.0, img_size=raw_size[0]
         )
+        
+        # NEW: store SA CP settings
+        self.sa_copy_paste = bool(sa_copy_paste)
+        self.sa_cp_prob = float(sa_cp_prob)
+        self.sa_cp_min_comp_px = int(sa_cp_min_comp_px)
+        self.sa_cp_max_overlap = float(sa_cp_max_overlap)
+        self.sa_cp_max_trials = int(sa_cp_max_trials)
+        self.sa_cp_same_class_only = bool(sa_cp_same_class_only)
+        self.get_class_id = get_class_id
+        
         subset_path = os.path.join(data_dir, prefix)
 
         if not os.path.isdir(subset_path):
@@ -160,6 +182,43 @@ class AeDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
+    # ---- helpers for sa_copy_paste (inter-sketch) ----
+    def _infer_class_id(self, idx):
+        # 優先使用外部提供的 mapping；否則用上層資料夾名
+        if callable(self.get_class_id):
+            try:
+                return self.get_class_id(self.file_list[idx])
+            except Exception:
+                pass
+        try:
+            import os
+            return os.path.basename(os.path.dirname(self.file_list[idx]))
+        except Exception:
+            return None
+
+    def _pick_template_index(self, target_idx):
+        # 若要求同類別，盡力在同類別中挑；否則任選不同 index
+        n = len(self.file_list)
+        if n <= 1: return target_idx
+        if self.sa_cp_same_class_only:
+            t_cls = self._infer_class_id(target_idx)
+            if t_cls is not None:
+                cands = [k for k in range(n) if k != target_idx and self._infer_class_id(k) == t_cls]
+                if cands:
+                    return random.choice(cands)
+        k = random.randrange(n - 1)
+        return k if k < target_idx else k + 1
+
+    def _fetch_template_raw(self, tidx):
+        # 讀 template 檔的 raw，回傳 (1,H,W) torch.float32 in [0,1]
+        obj = torch.load(self.file_list[tidx], map_location="cpu")
+        # 依你的 .pt 結構取 raw；這裡沿用你 __getitem__ 的 key
+        arr = obj["img_raw"].view(self.raw_size[0], self.raw_size[1]).unsqueeze(0)
+        t = arr.to(torch.float32)
+        if t.max() > 1: t = t / 255.0
+        return t.clamp(0, 1)
+    # ---- end of helpers for sa_copy_paste (inter-sketch) ----
+    
     def __getitem__(self, index):
         data = torch.load(self.file_list[index])
         input_raw = (
@@ -188,6 +247,24 @@ class AeDataset(Dataset):
             # 轉回 tensor
             input_raw = torch.from_numpy(aug_input_raw).unsqueeze(0)
             input_dis = torch.from_numpy(aug_input_dis).unsqueeze(0)
+        
+        # --- NEW: inter-sketch semantic-aware copy-paste (以機率觸發) ---
+        if self.sa_copy_paste and self.sa_cp_prob > 0:
+            input_raw, input_dis = sa_copy_paste_apply(
+                idx=index,
+                raw01=input_raw.to(torch.float32).clamp(0, 1),
+                dis01=input_dis.to(torch.float32).clamp(0, 1),
+                fetch_template_raw=lambda tidx: self._fetch_template_raw(tidx),
+                pick_template_index=lambda tgt_idx: self._pick_template_index(tgt_idx),
+                prob=self.sa_cp_prob,
+                min_comp_px=self.sa_cp_min_comp_px,
+                max_overlap=self.sa_cp_max_overlap,
+                max_trials=self.sa_cp_max_trials,
+                same_class_only=self.sa_cp_same_class_only,
+                constraint="inside_largest",           # or "provided_mask"
+                # constraint_mask=my_mask_np,          # 若用 provided_mask
+                keep_inside=True,
+            )
 
         return input_raw, input_dis
 
