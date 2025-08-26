@@ -4,6 +4,126 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
+#!! 可能可以加resnet在GCN
+#iou in gnc可以調
+#enhanced features
+def build_overlap_graph(stroke_images, iou_thresh=0.1):
+    """
+    Build adjacency matrix based on bounding box IoU of strokes.
+    
+    stroke_images: (N, H, W) binary masks for each stroke
+    returns: (N, N) adjacency matrix (0/1)
+    """
+    N, H, W = stroke_images.shape
+    boxes = []
+
+    # Step 1: bounding boxes
+    for i in range(N):
+        ys, xs = torch.where(stroke_images[i] > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            boxes.append((0,0,0,0))  # empty stroke
+        else:
+            x_min, x_max = xs.min().item(), xs.max().item()
+            y_min, y_max = ys.min().item(), ys.max().item()
+            boxes.append((x_min, y_min, x_max, y_max))
+
+    # Step 2+3: IoU adjacency
+    adj = torch.zeros((N, N), dtype=torch.float32)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                continue
+            xi1, yi1, xi2, yi2 = boxes[i]
+            xj1, yj1, xj2, yj2 = boxes[j]
+
+            # intersection
+            inter_x1, inter_y1 = max(xi1, xj1), max(yi1, yj1)
+            inter_x2, inter_y2 = min(xi2, xj2), min(yi2, yj2)
+            inter_area = max(0, inter_x2 - inter_x1 + 1) * max(0, inter_y2 - inter_y1 + 1)
+
+            # union
+            area_i = (xi2 - xi1 + 1) * (yi2 - yi1 + 1)
+            area_j = (xj2 - xj1 + 1) * (yj2 - yj1 + 1)
+            union_area = area_i + area_j - inter_area
+
+            iou = inter_area / union_area if union_area > 0 else 0.0
+
+            if iou > iou_thresh:
+                adj[i, j] = 1.0
+
+    # Step 4: add self-loops
+    adj += torch.eye(N)
+
+    return adj
+
+
+class SeqSpaFusion(nn.Module):
+    """
+    Sequential (BiLSTM) + Spatial (GCN) Encoder Fusion
+    Input:
+        stroke_embeds: (B, N, D)  # ordered stroke embeddings
+        adj_matrix: (B, N, N)     # overlap adjacency graph
+    Output:
+        enhanced_embeds: (B, N, D_out)
+    """
+
+    def __init__(self, d_model=256, hidden_size=128, gcn_hidden=128, out_dim=256, num_gcn_layers=2):
+        super(SeqSpaFusion, self).__init__()
+
+        # Sequential Encoder (BiLSTM)
+        self.lstm = nn.LSTM(
+            input_size=d_model,
+            hidden_size=hidden_size,
+            bidirectional=True,
+            batch_first=True
+        )
+        self.seq_proj = nn.Linear(hidden_size * 2, d_model)
+
+        # Spatial Encoder (GCN)
+        self.gcn_layers = nn.ModuleList([
+            nn.Linear(d_model if i == 0 else gcn_hidden, gcn_hidden)
+            for i in range(num_gcn_layers)
+        ])
+        self.gcn_proj = nn.Linear(gcn_hidden, d_model)
+
+        # Fusion MLP
+        fusion_in_dim = d_model * 3  # original + seq + spa
+        self.mlp = nn.Sequential(
+            nn.Linear(fusion_in_dim, out_dim),
+            nn.ReLU(),
+            nn.Linear(out_dim, out_dim)
+        )
+        
+
+    def forward(self, stroke_embeds, adj_matrix, mask = None):
+        B, N, D = stroke_embeds.shape
+
+        # Sequential encoding (temporal order preserved)
+        seq_out, _ = self.lstm(stroke_embeds)   # (B, N, 2*hidden)
+        seq_feat = self.seq_proj(seq_out)       # (B, N, D)
+
+        # Spatial encoding (message passing using adjacency)
+        spa_feat = stroke_embeds
+        for idx, layer in enumerate(self.gcn_layers):
+            agg = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
+            new_feat = layer(agg)
+
+            # residual connection
+            if new_feat.shape == spa_feat.shape:  # same dimension, safe residual
+                spa_feat = F.relu(new_feat + spa_feat)
+            else:
+                spa_feat = F.relu(new_feat)
+
+        # 🔹 always project back to d_model
+        spa_feat = self.gcn_proj(spa_feat)   # (B, N, 256)
+
+        # Fusion
+        fused = torch.cat([stroke_embeds, seq_feat, spa_feat], dim=-1)  # (B, N, 3D)
+        enhanced = self.mlp(fused)                                      # (B, N, D_out)
+        if mask is not None:
+            enhanced = enhanced * mask.unsqueeze(-1).float()
+        return enhanced
+
 
 class AddCoords(nn.Module):
     """
@@ -63,14 +183,14 @@ class CoordConv(nn.Module):
 
 class AutoencoderEmbed(nn.Module):
     """
-    用於筆劃嵌入的自動編碼器模型。
-    包含一個編碼器和兩個解碼器（一個用於重建，一個用於距離場預測）。
+    Autoencoder model for stroke embedding.
+    Contains an encoder and two independent decoders (one for reconstruction, one for distance field prediction).
     """
 
     def __init__(self, code_size, x_dim, y_dim, root_feature):
         super(AutoencoderEmbed, self).__init__()
 
-        # 編碼器
+        # Encoder
         self.encoder = nn.Sequential(
             CoordConv(x_dim, y_dim, 1, root_feature, kernel_size=3, padding=1),
             nn.BatchNorm2d(root_feature),
@@ -111,15 +231,15 @@ class AutoencoderEmbed(nn.Module):
             nn.Sigmoid(),
         )
 
-        # 解碼器通用部分
+        # Shared decoder fully connected part
         self.decoder_fc = nn.Sequential(
             nn.Linear(code_size, 4096),
             nn.Linear(4096, root_feature * 16 * 8 * 8),
             nn.Unflatten(1, (root_feature * 16, 8, 8)),
         )
 
-        # 解碼器卷積部分
-        decoder_conv = nn.Sequential(
+        # Independent convolutional part for reconstruction decoder
+        self.decoder_conv_cons = nn.Sequential(
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
             nn.BatchNorm2d(root_feature * 16),
             nn.ReLU(True),
@@ -142,11 +262,33 @@ class AutoencoderEmbed(nn.Module):
             nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
         )
 
-        # 兩個解碼器分支
-        self.decoder_for_cons = nn.Sequential(self.decoder_fc, decoder_conv)
-        self.decoder_for_dist = nn.Sequential(
-            self.decoder_fc, nn.Sequential(*list(decoder_conv.children()))
-        )  # 複製一份
+        # Independent convolutional part for distance field decoder
+        self.decoder_conv_dist = nn.Sequential(
+            nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 16),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
+            nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 8),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
+            nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
+            nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
+            nn.Conv2d(root_feature, root_feature, 3, padding=1),
+            nn.BatchNorm2d(root_feature),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
+        )
+
+        # Combine fully connected and convolutional parts for each decoder
+        self.decoder_for_cons = nn.Sequential(self.decoder_fc, self.decoder_conv_cons)
+        self.decoder_for_dist = nn.Sequential(self.decoder_fc, self.decoder_conv_dist)
 
     def forward(self, input_tensor):
         code = self.encoder(input_tensor)
@@ -229,11 +371,11 @@ class EncoderLayer(nn.Module):
         # Pre-LN
         x_norm = self.layernorm1(x)
         attn_output, _ = self.mha(x_norm, x_norm, x_norm, mask)
-        out1 = x + self.dropout1(attn_output)
+        out1 = x + attn_output
 
         out1_norm = self.layernorm2(out1)
         ffn_output = self.ffn(out1_norm)
-        out2 = out1 + self.dropout2(ffn_output)
+        out2 = out1 + ffn_output
 
         return out2
 
@@ -249,22 +391,22 @@ class DecoderLayer(nn.Module):
         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
-        self.dropout3 = nn.Dropout(rate)
+        
 
     def forward(self, x, enc_output, look_ahead_mask, padding_mask):
         x_norm = self.layernorm1(x)
         attn1, attn_weights_block1 = self.mha1(x_norm, x_norm, x_norm, look_ahead_mask)
-        out1 = x + self.dropout1(attn1)
+        out1 = x + attn1
 
         out1_norm = self.layernorm2(out1)
         attn2, attn_weights_block2 = self.mha2(
             enc_output, enc_output, out1_norm, padding_mask
         )
-        out2 = out1 + self.dropout2(attn2)
+        out2 = out1 + attn2
 
         out2_norm = self.layernorm3(out2)
         ffn_output = self.ffn(out2_norm)
-        out3 = out2 + self.dropout3(ffn_output)
+        out3 = out2 + ffn_output
 
         return out3, attn_weights_block1, attn_weights_block2
 
@@ -351,8 +493,20 @@ class GpTransformer(nn.Module):
         self.decoder = Decoder(num_layers, d_model, num_heads, dff, pe_target, rate)
         self.disc_layer = Discriminator(d_model)
         self.layernorm = nn.LayerNorm(d_model, eps=1e-6)
+        self.seqspa_fusion = SeqSpaFusion(d_model=d_model)
 
-    def forward(self, inp, tar, enc_padding_mask, look_ahead_mask, dec_padding_mask):
+    def forward(
+        self,
+        inp,
+        adj_matrix,
+        mask,
+        tar,
+        enc_padding_mask,
+        look_ahead_mask,
+        dec_padding_mask,
+    ):
+        inp = self.seqspa_fusion(inp, adj_matrix, mask)
+        
         enc_output = self.encoder(inp, enc_padding_mask)
         dec_output, attention_weights = self.decoder(
             tar, enc_output, look_ahead_mask, dec_padding_mask
