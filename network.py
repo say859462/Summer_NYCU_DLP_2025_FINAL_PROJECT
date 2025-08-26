@@ -87,7 +87,7 @@ class SeqSpaFusion(nn.Module):
         self.gcn_proj = nn.Linear(gcn_hidden, d_model)
 
         # Fusion MLP
-        fusion_in_dim = d_model * 3   # original + seq + spa
+        fusion_in_dim = d_model * 3  # original + seq + spa
         self.mlp = nn.Sequential(
             nn.Linear(fusion_in_dim, out_dim),
             nn.ReLU(),
@@ -109,7 +109,7 @@ class SeqSpaFusion(nn.Module):
             new_feat = layer(agg)
 
             # residual connection
-            if new_feat.shape == spa_feat.shape:   # same dimension, safe residual
+            if new_feat.shape == spa_feat.shape:  # same dimension, safe residual
                 spa_feat = F.relu(new_feat + spa_feat)
             else:
                 spa_feat = F.relu(new_feat)
@@ -362,8 +362,8 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         self.mha = MultiHeadAttention(d_model, num_heads)
         self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model)
-        self.layernorm2 = nn.LayerNorm(d_model)
+        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
 
@@ -371,11 +371,11 @@ class EncoderLayer(nn.Module):
         # Pre-LN
         x_norm = self.layernorm1(x)
         attn_output, _ = self.mha(x_norm, x_norm, x_norm, mask)
-        out1 = x + self.dropout1(attn_output)
+        out1 = x + attn_output
 
         out1_norm = self.layernorm2(out1)
         ffn_output = self.ffn(out1_norm)
-        out2 = out1 + self.dropout2(ffn_output)
+        out2 = out1 + ffn_output
 
         return out2
 
@@ -386,27 +386,27 @@ class DecoderLayer(nn.Module):
         self.mha1 = MultiHeadAttention(d_model, num_heads)
         self.mha2 = MultiHeadAttention(d_model, num_heads)
         self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model)
-        self.layernorm2 = nn.LayerNorm(d_model)
-        self.layernorm3 = nn.LayerNorm(d_model)
+        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
-        self.dropout3 = nn.Dropout(rate)
+        
 
     def forward(self, x, enc_output, look_ahead_mask, padding_mask):
         x_norm = self.layernorm1(x)
         attn1, attn_weights_block1 = self.mha1(x_norm, x_norm, x_norm, look_ahead_mask)
-        out1 = x + self.dropout1(attn1)
+        out1 = x + attn1
 
         out1_norm = self.layernorm2(out1)
         attn2, attn_weights_block2 = self.mha2(
             enc_output, enc_output, out1_norm, padding_mask
         )
-        out2 = out1 + self.dropout2(attn2)
+        out2 = out1 + attn2
 
         out2_norm = self.layernorm3(out2)
         ffn_output = self.ffn(out2_norm)
-        out3 = out2 + self.dropout3(ffn_output)
+        out3 = out2 + ffn_output
 
         return out3, attn_weights_block1, attn_weights_block2
 
@@ -494,8 +494,19 @@ class GpTransformer(nn.Module):
         self.disc_layer = Discriminator(d_model)
         self.layernorm = nn.LayerNorm(d_model, eps=1e-6)
         self.seqspa_fusion = SeqSpaFusion(d_model=d_model)
-    def forward(self, inp, adj_matrix, mask, tar, enc_padding_mask, look_ahead_mask, dec_padding_mask):
+
+    def forward(
+        self,
+        inp,
+        adj_matrix,
+        mask,
+        tar,
+        enc_padding_mask,
+        look_ahead_mask,
+        dec_padding_mask,
+    ):
         inp = self.seqspa_fusion(inp, adj_matrix, mask)
+        
         enc_output = self.encoder(inp, enc_padding_mask)
         dec_output, attention_weights = self.decoder(
             tar, enc_output, look_ahead_mask, dec_padding_mask
