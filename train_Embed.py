@@ -134,6 +134,7 @@ def train_net(logger, output_folder, device):
         lr=hyper_params["lr"],
         betas=(0.9, 0.999),
         eps=1e-7,
+        weight_decay=1e-5
     )
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     ckpt_dir = os.path.join(output_folder, "checkpoints")

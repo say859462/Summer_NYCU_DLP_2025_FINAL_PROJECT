@@ -61,47 +61,49 @@ class CoordConv(nn.Module):
         return ret
 
 
+import torch.nn as nn
+
 class AutoencoderEmbed(nn.Module):
     """
-    用於筆劃嵌入的自動編碼器模型。
-    包含一個編碼器和兩個解碼器（一個用於重建，一個用於距離場預測）。
+    Autoencoder model for stroke embedding.
+    Contains an encoder and two independent decoders (one for reconstruction, one for distance field prediction).
     """
 
     def __init__(self, code_size, x_dim, y_dim, root_feature):
         super(AutoencoderEmbed, self).__init__()
 
-        # 編碼器
+        # Encoder
         self.encoder = nn.Sequential(
             CoordConv(x_dim, y_dim, 1, root_feature, kernel_size=3, padding=1),
-            nn.BatchNorm2d(root_feature, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature, momentum=0.95),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 128
             nn.Conv2d(root_feature, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 8
             nn.Flatten(),
@@ -111,42 +113,64 @@ class AutoencoderEmbed(nn.Module):
             nn.Sigmoid(),
         )
 
-        # 解碼器通用部分
+        # Shared decoder fully connected part
         self.decoder_fc = nn.Sequential(
             nn.Linear(code_size, 4096),
             nn.Linear(4096, root_feature * 16 * 8 * 8),
             nn.Unflatten(1, (root_feature * 16, 8, 8)),
         )
 
-        # 解碼器卷積部分
-        decoder_conv = nn.Sequential(
+        # Independent convolutional part for reconstruction decoder
+        self.decoder_conv_cons = nn.Sequential(
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
             nn.Conv2d(root_feature, root_feature, 3, padding=1),
-            nn.BatchNorm2d(root_feature, momentum=0.95),  # <--- 已修改
+            nn.BatchNorm2d(root_feature, momentum=0.95),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
         )
 
-        # 兩個解碼器分支
-        self.decoder_for_cons = nn.Sequential(self.decoder_fc, decoder_conv)
-        self.decoder_for_dist = nn.Sequential(
-            self.decoder_fc, nn.Sequential(*list(decoder_conv.children()))
-        )  # 複製一份
+        # Independent convolutional part for distance field decoder
+        self.decoder_conv_dist = nn.Sequential(
+            nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
+            nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
+            nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
+            nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
+            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
+            nn.Conv2d(root_feature, root_feature, 3, padding=1),
+            nn.BatchNorm2d(root_feature, momentum=0.95),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
+        )
+
+        # Combine fully connected and convolutional parts for each decoder
+        self.decoder_for_cons = nn.Sequential(self.decoder_fc, self.decoder_conv_cons)
+        self.decoder_for_dist = nn.Sequential(self.decoder_fc, self.decoder_conv_dist)
 
     def forward(self, input_tensor):
         code = self.encoder(input_tensor)
