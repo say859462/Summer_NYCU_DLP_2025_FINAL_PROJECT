@@ -95,6 +95,7 @@ parser.add_argument(
 
 parser.add_argument("--optimizer", type=str, default="adam",
                     choices=["adam", "adamw"], help="最佳化器")
+parser.add_argument("--weight_decay", type=float, default=0.01, help="L2/AdamW 權重衰減")
 
 
 # ====== 輔助函式 ======
