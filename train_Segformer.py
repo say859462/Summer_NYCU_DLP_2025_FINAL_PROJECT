@@ -739,7 +739,7 @@ if __name__ == "__main__":
     ).to(device)
 
     optimizer = optim.Adam(
-        transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.98), eps=1e-9
+        transformer.parameters(), lr=hyper_params["lr"], betas=(0.9, 0.999), eps=1e-7
     )
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
