@@ -129,13 +129,7 @@ def train_net(logger, output_folder, device):
         train_logger.error(f"資料載入失敗: {e}")
         return
 
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=hyper_params["lr"],
-        betas=(0.9, 0.999),
-        eps=1e-7,
-        weight_decay=1e-5
-    )
+    optimizer = optim.Adam(model.parameters(), lr=hyper_params["lr"])
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
     ckpt_dir = os.path.join(output_folder, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -209,7 +203,7 @@ def train_net(logger, output_folder, device):
             current_lr = optimizer.param_groups[0]["lr"]
             train_logger.info(
                 f"步驟 [{step}/{hyper_params['maxIter']}], 總損失: {loss.item():.6f}, "
-                f"重建損失: {cons_loss.item():.6f}, 距離場損失: {pre_loss.item():.6f}"
+                f"重建損失: {cons_loss.item():.6f}, 距離場損失: {pre_loss.item():.6f}, "
                 f"LR: {current_lr:.1e}"
             )
             writer.add_scalar("Loss/train_total", loss.item(), step)

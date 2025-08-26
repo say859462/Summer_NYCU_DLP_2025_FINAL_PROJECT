@@ -61,8 +61,6 @@ class CoordConv(nn.Module):
         return ret
 
 
-import torch.nn as nn
-
 class AutoencoderEmbed(nn.Module):
     """
     Autoencoder model for stroke embedding.
@@ -75,35 +73,35 @@ class AutoencoderEmbed(nn.Module):
         # Encoder
         self.encoder = nn.Sequential(
             CoordConv(x_dim, y_dim, 1, root_feature, kernel_size=3, padding=1),
-            nn.BatchNorm2d(root_feature, momentum=0.95),
+            nn.BatchNorm2d(root_feature),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 128
             nn.Conv2d(root_feature, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 2),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 2),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 4),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 4),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 8),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 8),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 16),
             nn.ReLU(True),
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 16),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),  # 8
             nn.Flatten(),
@@ -123,23 +121,23 @@ class AutoencoderEmbed(nn.Module):
         # Independent convolutional part for reconstruction decoder
         self.decoder_conv_cons = nn.Sequential(
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 16),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 8),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 4),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 2),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
             nn.Conv2d(root_feature, root_feature, 3, padding=1),
-            nn.BatchNorm2d(root_feature, momentum=0.95),
+            nn.BatchNorm2d(root_feature),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
         )
@@ -147,23 +145,23 @@ class AutoencoderEmbed(nn.Module):
         # Independent convolutional part for distance field decoder
         self.decoder_conv_dist = nn.Sequential(
             nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 16),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
             nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 8),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
             nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 4),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
             nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2, momentum=0.95),
+            nn.BatchNorm2d(root_feature * 2),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
             nn.Conv2d(root_feature, root_feature, 3, padding=1),
-            nn.BatchNorm2d(root_feature, momentum=0.95),
+            nn.BatchNorm2d(root_feature),
             nn.ReLU(True),
             nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
         )
@@ -244,8 +242,8 @@ class EncoderLayer(nn.Module):
         super(EncoderLayer, self).__init__()
         self.mha = MultiHeadAttention(d_model, num_heads)
         self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm1 = nn.LayerNorm(d_model)
+        self.layernorm2 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
 
@@ -268,9 +266,9 @@ class DecoderLayer(nn.Module):
         self.mha1 = MultiHeadAttention(d_model, num_heads)
         self.mha2 = MultiHeadAttention(d_model, num_heads)
         self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm1 = nn.LayerNorm(d_model)
+        self.layernorm2 = nn.LayerNorm(d_model)
+        self.layernorm3 = nn.LayerNorm(d_model)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
         self.dropout3 = nn.Dropout(rate)
@@ -374,7 +372,7 @@ class GpTransformer(nn.Module):
         self.encoder = Encoder(num_layers, d_model, num_heads, dff, pe_input, rate)
         self.decoder = Decoder(num_layers, d_model, num_heads, dff, pe_target, rate)
         self.disc_layer = Discriminator(d_model)
-        self.layernorm = nn.LayerNorm(d_model, eps=1e-6)
+        self.layernorm = nn.LayerNorm(d_model)
 
     def forward(self, inp, tar, enc_padding_mask, look_ahead_mask, dec_padding_mask):
         enc_output = self.encoder(inp, enc_padding_mask)
