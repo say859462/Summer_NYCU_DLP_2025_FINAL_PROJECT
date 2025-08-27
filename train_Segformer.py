@@ -21,6 +21,7 @@ from PIL import Image
 from loader import GPRegDataset, gpreg_collate_fn
 from network import GpTransformer, AutoencoderEmbed
 
+
 # ====== 參數解析  ======
 parser = argparse.ArgumentParser(
     description="訓練 Sketch Semantic Segmentation Transformer 模型"
@@ -45,7 +46,7 @@ parser.add_argument(
     "--embed_ckpt",
     help="預訓練 Embedding Autoencoder 的 .pth checkpoint 路徑",
     type=str,
-    default="best_loss_model.pth",
+    default="result\\best.pth",
 )
 parser.add_argument(
     "--ckpt",
@@ -174,7 +175,7 @@ def loss_fn(real, pred, gamma=2.0):
     return loss_val, acc_val
 
 
-# enhanced features
+#enhanced features
 def build_overlap_graph(stroke_images, iou_thresh=0.1):
     """
     GPU-friendly version of overlap graph construction.
@@ -197,26 +198,10 @@ def build_overlap_graph(stroke_images, iou_thresh=0.1):
     flat_mask = flat > 0
 
     # min/max per stroke
-    x_min = (
-        torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, W, device=device))
-        .min(dim=1)
-        .values
-    )
-    x_max = (
-        torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, 0, device=device))
-        .max(dim=1)
-        .values
-    )
-    y_min = (
-        torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, H, device=device))
-        .min(dim=1)
-        .values
-    )
-    y_max = (
-        torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, 0, device=device))
-        .max(dim=1)
-        .values
-    )
+    x_min = torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, W, device=device)).min(dim=1).values
+    x_max = torch.where(flat_mask, xs.expand(N, -1), torch.full_like(xs, 0, device=device)).max(dim=1).values
+    y_min = torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, H, device=device)).min(dim=1).values
+    y_max = torch.where(flat_mask, ys.expand(N, -1), torch.full_like(ys, 0, device=device)).max(dim=1).values
 
     # empty strokes: fix invalid boxes
     empty_mask = (x_min > x_max) | (y_min > y_max)
@@ -250,8 +235,6 @@ def build_overlap_graph(stroke_images, iou_thresh=0.1):
     adj.fill_diagonal_(1.0)
 
     return adj
-
-
 # =============================================================================
 
 
@@ -319,10 +302,10 @@ def cook_raw(batch_data):
         )
         single_labels = glabel_raw[i, : nb_gps[i], : nb_strokes[i]]
         stroke_embeds = en_modelAESSG.encode(single_input_strokes)
-        # MODIFIED
+        #MODIFIED
         # ---- build adjacency graph from stroke masks ----
         stroke_masks = input_raw[i, :, :, : nb_strokes[i]].permute(2, 0, 1)  # (N,H,W)
-        adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1)  # (N,N)
+        adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1)       # (N,N)
         adj_matrix = adj_matrix.to(stroke_embeds.device)
         adj_matrices.append(adj_matrix)
         input_embeddings.append(stroke_embeds)
@@ -336,14 +319,14 @@ def cook_raw(batch_data):
     padded_adj = []
     mask = torch.zeros(batch_size, max_strokes, device=device)
 
-    for i, adj in enumerate(adj_matrices):
+    for i,adj in enumerate(adj_matrices):
         N = adj.shape[0]
         pad = torch.zeros(max_strokes, max_strokes, device=adj.device)
         pad[:N, :N] = adj
         padded_adj.append(pad)
 
         mask[i, :N] = 1.0
-    padded_adj = torch.stack(padded_adj, dim=0)  # (B, Nmax, Nmax)
+    padded_adj = torch.stack(padded_adj, dim=0)   # (B, Nmax, Nmax)
     padded_input_embeds = nn.utils.rnn.pad_sequence(
         input_embeddings, batch_first=True, padding_value=-2.0
     )
@@ -449,11 +432,7 @@ def test_autoregre_step(batch_data):
         for _ in range(int(nb_max_try)):
             enc_mask, combined_mask, dec_mask = create_masks(inp_embed, gp_token)
             stroke_masks = input_raw[0, :, :, : nb_strokes[0]].permute(2, 0, 1)
-            adj_matrix = (
-                build_overlap_graph(stroke_masks, iou_thresh=0.1)
-                .unsqueeze(0)
-                .to(device)
-            )
+            adj_matrix = build_overlap_graph(stroke_masks, iou_thresh=0.1).unsqueeze(0).to(device)
             B, N = inp_embed.shape[0], stroke_masks.shape[0]
             mask = torch.ones(B, N, device=device)
             predictions, _ = transformer(
@@ -544,13 +523,7 @@ def train_net():
                     inp_embed, decoder_input
                 )
                 predictions, _ = transformer(
-                    inp_embed,
-                    adj_matrix,
-                    mask,
-                    decoder_input,
-                    enc_mask,
-                    combined_mask,
-                    dec_mask,
+                    inp_embed, adj_matrix, mask, decoder_input, enc_mask, combined_mask, dec_mask
                 )
 
                 # 獲取最後一個預測
@@ -599,13 +572,7 @@ def train_net():
         enc_mask, combined_mask, dec_mask = create_masks(inp_embed, tar_for_input)
 
         predictions, _ = transformer(
-            inp_embed,
-            adj_matrix,
-            mask,
-            tar_for_input,
-            enc_mask,
-            combined_mask,
-            dec_mask,
+            inp_embed, adj_matrix, mask, tar_for_input, enc_mask, combined_mask, dec_mask
         )
 
         # 確保predictions和labels的形狀完全一致
@@ -651,14 +618,15 @@ def train_net():
             writer.add_scalar("Learning_Rate", current_lr, step)
 
         if step > 0 and step % hyper_params["exeValStep"] == 0:
-            val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
+            val_loss, val_gacc, val_sacc, val_cacc, count = 0, 0, 0, 0, 0
             test_iter = iter(test_loader)
             while True:
                 try:
                     batch_data_val = next(test_iter)
-                    loss_v, _, sacc_v, cacc_v, final_predictions_val = (
+                    loss_v, gacc_v, sacc_v, cacc_v, final_predictions_val = (
                         test_autoregre_step(batch_data_val)
                     )
+                    val_gacc += gacc_v.item()
                     val_loss += loss_v.item()
                     val_sacc += sacc_v.item()
                     val_cacc += cacc_v
@@ -708,19 +676,21 @@ def train_net():
                     count += 1
                 except StopIteration:
                     break
-            avg_loss, avg_sacc, avg_cacc = (
+            avg_loss, avg_sacc, avg_gacc, avg_cacc = (
                 val_loss / count,
                 val_sacc / count,
+                val_gacc / count,
                 val_cacc / count,
             )
             logger.info(
-                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
+                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f},平均 GAcc: {avg_gacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
             )
             writer.add_scalar("Loss/validation", avg_loss, step)
             writer.add_scalar("SAcc/validation", avg_sacc, step)
+            writer.add_scalar("GAcc/validation", avg_gacc, step)
             writer.add_scalar("CAcc/validation", avg_cacc, step)
 
-            current_score_sum = avg_sacc + avg_cacc
+            current_score_sum = avg_sacc + avg_cacc + avg_gacc
 
             # 將當前的驗證分數傳給 scheduler
             scheduler.step(current_score_sum)
@@ -773,21 +743,22 @@ def test_net():
     logger.info("--- 開始測試 ---")
     img_folder = os.path.join(output_folder, "imgs")
     os.makedirs(img_folder, exist_ok=True)
-    val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
+    val_loss, val_gacc, val_sacc, val_cacc, count = 0, 0, 0, 0, 0
     test_iter = iter(test_loader)
     test_itr = 1
     while True:
         try:
             batch_data = next(test_iter)
-            loss_v, _, sacc_v, cacc_v, final_predictions = test_autoregre_step(
+            loss_v, gacc_v, sacc_v, cacc_v, final_predictions = test_autoregre_step(
                 batch_data
             )
             val_loss += loss_v.item()
+            val_gacc += gacc_v.item()
             val_sacc += sacc_v.item()
             val_cacc += cacc_v
             count += 1
             logger.info(
-                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.6f}, CAcc: {cacc_v:.6f}"
+                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.6f}, GAcc: {gacc_v.item():.6f}, CAcc: {cacc_v:.6f}"
             )
             input_raw, glabel_raw, nb_strokes, _ = batch_data
             gt_vis_img = generate_grouped_image(
@@ -807,10 +778,9 @@ def test_net():
             test_itr += 1
         except StopIteration:
             break
-    avg_loss, avg_sacc, avg_cacc = val_loss / count, val_sacc / count, val_cacc / count
+    avg_loss, avg_sacc, avg_gacc, avg_cacc = val_loss / count ,val_sacc / count, val_gacc / count, val_cacc / count
     logger.info(
-        f"測試完成 - 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
-    )
+        f"測試完成 - 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 GAcc: {avg_gacc:.6f} 平均 CAcc: {avg_cacc:.6f}")
 
 
 # ====== 主程式 ======
