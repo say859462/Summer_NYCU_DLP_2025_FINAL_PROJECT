@@ -132,7 +132,7 @@ def train_net(logger, output_folder, device):
     optimizer = optim.Adam(
         model.parameters(),
         lr=hyper_params["lr"],
-        betas=(0.9, 0.999), 
+        betas=(0.9, 0.999),
         eps=1e-7,
     )
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
@@ -372,7 +372,7 @@ def test_net(logger, output_folder, device):
             recon_logits, _ = model(inputs)
             recon_pred = torch.sigmoid(recon_logits)
             loss, acc = loss_fn_for_eval(recon_pred, inputs)
-            total_loss += loss.item() * inputs.size(0)
+            total_loss += loss * inputs.size(0)
             total_acc += acc * inputs.size(0)
 
     avg_loss = total_loss / len(test_dataset)

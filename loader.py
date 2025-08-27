@@ -223,13 +223,13 @@ class GPRegDataset(Dataset):
         img_raw = data["img_raw"]
         glabel_raw = data["glabel_raw"]
 
-        if self.prefix == "train" and glabel_raw.shape[0] > 1:
-            stroke_counts_per_group = torch.sum(glabel_raw, dim=1)
-            sorted_indices = torch.argsort(stroke_counts_per_group, descending=True)
-            glabel_raw = glabel_raw[sorted_indices]
-            if "part_names" in data:
-                part_names = data["part_names"]
-                data["part_names"] = [part_names[i] for i in sorted_indices]
+        # if self.prefix == "train" and glabel_raw.shape[0] > 1:
+        #     stroke_counts_per_group = torch.sum(glabel_raw, dim=1)
+        #     sorted_indices = torch.argsort(stroke_counts_per_group, descending=True)
+        #     glabel_raw = glabel_raw[sorted_indices]
+        #     if "part_names" in data:
+        #         part_names = data["part_names"]
+        #         data["part_names"] = [part_names[i] for i in sorted_indices]
 
         nb_stroke = img_raw.shape[2]
         nb_gps = glabel_raw.shape[0]
