@@ -1,483 +1,276 @@
+import os
 import torch
-import torch.nn as nn
+from torch.utils.data import Dataset
 import torch.nn.functional as F
-import math
+import logging
+import albumentations as A
+import random
 import numpy as np
+from PIL import Image
 
-#!! 可能可以加resnet在GCN
-#iou in gnc可以調
-#enhanced features
-def build_overlap_graph(stroke_images, iou_thresh=0.1):
-    """
-    Build adjacency matrix based on bounding box IoU of strokes.
-    
-    stroke_images: (N, H, W) binary masks for each stroke
-    returns: (N, N) adjacency matrix (0/1)
-    """
-    N, H, W = stroke_images.shape
-    boxes = []
+# --- 關鍵修正：確保匯入 ReplayCompose ---
+from albumentations.core.composition import ReplayCompose
 
-    # Step 1: bounding boxes
-    for i in range(N):
-        ys, xs = torch.where(stroke_images[i] > 0)
-        if len(xs) == 0 or len(ys) == 0:
-            boxes.append((0,0,0,0))  # empty stroke
-        else:
-            x_min, x_max = xs.min().item(), xs.max().item()
-            y_min, y_max = ys.min().item(), ys.max().item()
-            boxes.append((x_min, y_min, x_max, y_max))
-
-    # Step 2+3: IoU adjacency
-    adj = torch.zeros((N, N), dtype=torch.float32)
-    for i in range(N):
-        for j in range(N):
-            if i == j:
-                continue
-            xi1, yi1, xi2, yi2 = boxes[i]
-            xj1, yj1, xj2, yj2 = boxes[j]
-
-            # intersection
-            inter_x1, inter_y1 = max(xi1, xj1), max(yi1, yj1)
-            inter_x2, inter_y2 = min(xi2, xj2), min(yi2, yj2)
-            inter_area = max(0, inter_x2 - inter_x1 + 1) * max(0, inter_y2 - inter_y1 + 1)
-
-            # union
-            area_i = (xi2 - xi1 + 1) * (yi2 - yi1 + 1)
-            area_j = (xj2 - xj1 + 1) * (yj2 - yj1 + 1)
-            union_area = area_i + area_j - inter_area
-
-            iou = inter_area / union_area if union_area > 0 else 0.0
-
-            if iou > iou_thresh:
-                adj[i, j] = 1.0
-
-    # Step 4: add self-loops
-    adj += torch.eye(N)
-
-    return adj
+loader_logger = logging.getLogger("main.loader")
 
 
-class SeqSpaFusion(nn.Module):
-    """
-    Sequential (BiLSTM) + Spatial (GCN) Encoder Fusion
-    Input:
-        stroke_embeds: (B, N, D)  # ordered stroke embeddings
-        adj_matrix: (B, N, N)     # overlap adjacency graph
-    Output:
-        enhanced_embeds: (B, N, D_out)
-    """
+class StrokeAugmentation:
+    """Stroke-level 資料增強類別（使用 ReplayCompose 確保變換一致性）"""
 
-    def __init__(self, d_model=256, hidden_size=128, gcn_hidden=128, out_dim=256, num_gcn_layers=2):
-        super(SeqSpaFusion, self).__init__()
+    def __init__(self, apply_prob=0.5, img_size=256):
+        self.apply_prob = apply_prob
+        self.img_size = img_size
 
-        # Sequential Encoder (BiLSTM)
-        self.lstm = nn.LSTM(
-            input_size=d_model,
-            hidden_size=hidden_size,
-            bidirectional=True,
-            batch_first=True
-        )
-        self.seq_proj = nn.Linear(hidden_size * 2, d_model)
-
-        # Spatial Encoder (GCN)
-        self.gcn_layers = nn.ModuleList([
-            nn.Linear(d_model if i == 0 else gcn_hidden, gcn_hidden)
-            for i in range(num_gcn_layers)
-        ])
-        self.gcn_proj = nn.Linear(gcn_hidden, d_model)
-
-        # Fusion MLP
-        fusion_in_dim = d_model * 3   # original + seq + spa
-        self.mlp = nn.Sequential(
-            nn.Linear(fusion_in_dim, out_dim),
-            nn.ReLU(),
-            nn.Linear(out_dim, out_dim)
-        )
-        
-
-    def forward(self, stroke_embeds, adj_matrix, mask = None):
-        B, N, D = stroke_embeds.shape
-
-        # Sequential encoding (temporal order preserved)
-        seq_out, _ = self.lstm(stroke_embeds)   # (B, N, 2*hidden)
-        seq_feat = self.seq_proj(seq_out)       # (B, N, D)
-
-        # Spatial encoding (message passing using adjacency)
-        spa_feat = stroke_embeds
-        for idx, layer in enumerate(self.gcn_layers):
-            agg = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
-            new_feat = layer(agg)
-
-            # residual connection
-            if new_feat.shape == spa_feat.shape:   # same dimension, safe residual
-                spa_feat = F.relu(new_feat + spa_feat)
-            else:
-                spa_feat = F.relu(new_feat)
-
-        # 🔹 always project back to d_model
-        spa_feat = self.gcn_proj(spa_feat)   # (B, N, 256)
-
-        # Fusion
-        fused = torch.cat([stroke_embeds, seq_feat, spa_feat], dim=-1)  # (B, N, 3D)
-        enhanced = self.mlp(fused)                                      # (B, N, D_out)
-        if mask is not None:
-            enhanced = enhanced * mask.unsqueeze(-1).float()
-        return enhanced
-
-
-class AddCoords(nn.Module):
-    """
-    將座標通道 (x, y, 和可選的 r) 添加到輸入張量中。
-    """
-
-    def __init__(self, x_dim=256, y_dim=256, with_r=False):
-        super(AddCoords, self).__init__()
-        self.x_dim = x_dim
-        self.y_dim = y_dim
-        self.with_r = with_r
-
-    def forward(self, input_tensor):
-        """
-        Args:
-            input_tensor: (batch, channels, x_dim, y_dim)
-        """
-        batch_size = input_tensor.size(0)
-
-        # 產生 x, y 座標
-        xx_channel = torch.arange(self.x_dim, device=input_tensor.device).float()
-        xx_channel = xx_channel.repeat(batch_size, 1, self.y_dim, 1).transpose(2, 3)
-
-        yy_channel = torch.arange(self.y_dim, device=input_tensor.device).float()
-        yy_channel = yy_channel.repeat(batch_size, 1, self.x_dim, 1)
-
-        # 正規化到 [-1, 1]
-        xx_channel = (xx_channel / (self.x_dim - 1)) * 2 - 1
-        yy_channel = (yy_channel / (self.y_dim - 1)) * 2 - 1
-
-        ret = torch.cat([input_tensor, xx_channel, yy_channel], dim=1)
-
-        if self.with_r:
-            rr = torch.sqrt(torch.pow(xx_channel, 2) + torch.pow(yy_channel, 2))
-            ret = torch.cat([ret, rr], dim=1)
-
-        return ret
-
-
-class CoordConv(nn.Module):
-    """
-    CoordConv 層，結合了 AddCoords 和一個標準的卷積模組。
-    """
-
-    def __init__(self, x_dim, y_dim, in_channels, out_channels, with_r=False, **kwargs):
-        super(CoordConv, self).__init__()
-        self.addcoords = AddCoords(x_dim=x_dim, y_dim=y_dim, with_r=with_r)
-
-        extra_channels = 3 if with_r else 2
-        self.conv = nn.Conv2d(in_channels + extra_channels, out_channels, **kwargs)
-
-    def forward(self, input_tensor):
-        ret = self.addcoords(input_tensor)
-        ret = self.conv(ret)
-        return ret
-
-
-class AutoencoderEmbed(nn.Module):
-    """
-    用於筆劃嵌入的自動編碼器模型。
-    包含一個編碼器和兩個解碼器（一個用於重建，一個用於距離場預測）。
-    """
-
-    def __init__(self, code_size, x_dim, y_dim, root_feature):
-        super(AutoencoderEmbed, self).__init__()
-
-        # 編碼器
-        self.encoder = nn.Sequential(
-            CoordConv(x_dim, y_dim, 1, root_feature, kernel_size=3, padding=1),
-            nn.BatchNorm2d(root_feature),
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),  # 128
-            nn.Conv2d(root_feature, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
-            nn.ReLU(True),
-            nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),  # 64
-            nn.Conv2d(root_feature * 2, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
-            nn.ReLU(True),
-            nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),  # 32
-            nn.Conv2d(root_feature * 4, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
-            nn.ReLU(True),
-            nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),  # 16
-            nn.Conv2d(root_feature * 8, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
-            nn.ReLU(True),
-            nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
-            nn.ReLU(True),
-            nn.MaxPool2d(2, 2),  # 8
-            nn.Flatten(),
-            nn.Linear(root_feature * 16 * 8 * 8, 4096),
-            nn.Sigmoid(),
-            nn.Linear(4096, code_size),
-            nn.Sigmoid(),
+        # --- 關鍵修正：使用 ReplayCompose ---
+        self.augmentation_pipeline = ReplayCompose(
+            [
+                A.Affine(
+                    scale=(0.8, 1.2),
+                    translate_percent=(-0.1, 0.1),
+                    rotate=(-15, 15),
+                    shear=(-5, 5),
+                    interpolation=Image.NEAREST,
+                    p=1.0,
+                )
+            ],
+            is_check_shapes=False,
         )
 
-        # 解碼器通用部分
-        self.decoder_fc = nn.Sequential(
-            nn.Linear(code_size, 4096),
-            nn.Linear(4096, root_feature * 16 * 8 * 8),
-            nn.Unflatten(1, (root_feature * 16, 8, 8)),
+    # __call__ 方法不再需要，邏輯已移至 Dataset 中以處理 replay
+    # def __call__(...):
+
+
+class SketchAugmentation:
+    """Sketch-level 資料增強類別（使用 ReplayCompose 確保剛性變換）"""
+
+    def __init__(self, apply_prob=0.5, img_size=256):
+        self.apply_prob = apply_prob
+        self.img_size = img_size
+
+        # --- 關鍵修正：同樣使用 ReplayCompose ---
+        self.geometric_augmentation = ReplayCompose(
+            [
+                A.Affine(
+                    scale=(0.8, 1.2),
+                    translate_percent=(-0.15, 0.15),
+                    rotate=(-15, 15),
+                    shear=(-10, 10),
+                    interpolation=Image.NEAREST,
+                    p=1.0,
+                )
+            ],
+            is_check_shapes=False,
         )
 
-        # 解碼器卷積部分
-        decoder_conv = nn.Sequential(
-            nn.Conv2d(root_feature * 16, root_feature * 16, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 16),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(root_feature * 16, root_feature * 8, 2, stride=2),  # 16
-            nn.Conv2d(root_feature * 8, root_feature * 8, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 8),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(root_feature * 8, root_feature * 4, 2, stride=2),  # 32
-            nn.Conv2d(root_feature * 4, root_feature * 4, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 4),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(root_feature * 4, root_feature * 2, 2, stride=2),  # 64
-            nn.Conv2d(root_feature * 2, root_feature * 2, 3, padding=1),
-            nn.BatchNorm2d(root_feature * 2),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(root_feature * 2, root_feature, 2, stride=2),  # 128
-            nn.Conv2d(root_feature, root_feature, 3, padding=1),
-            nn.BatchNorm2d(root_feature),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(root_feature, 1, 2, stride=2),  # 256
-        )
+    def __call__(self, sketch_data):
+        if random.random() > self.apply_prob:
+            return sketch_data
 
-        # 兩個解碼器分支
-        self.decoder_for_cons = nn.Sequential(self.decoder_fc, decoder_conv)
-        self.decoder_for_dist = nn.Sequential(
-            self.decoder_fc, nn.Sequential(*list(decoder_conv.children()))
-        )  # 複製一份
+        img_raw, glabel_raw, nb_stroke, nb_gp = sketch_data
 
-    def forward(self, input_tensor):
-        code = self.encoder(input_tensor)
-        reconstruction = self.decoder_for_cons(code)
-        distance_field = self.decoder_for_dist(code)
-        return reconstruction, distance_field
-
-    def encode(self, input_tensor):
-        return self.encoder(input_tensor)
-
-
-# --- Transformer 模型 ---
-class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads):
-        super(MultiHeadAttention, self).__init__()
-        assert d_model % num_heads == 0
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.depth = d_model // num_heads
-
-        self.wq = nn.Linear(d_model, d_model)
-        self.wk = nn.Linear(d_model, d_model)
-        self.wv = nn.Linear(d_model, d_model)
-        self.dense = nn.Linear(d_model, d_model)
-
-    def split_heads(self, x, batch_size):
-        x = x.view(batch_size, -1, self.num_heads, self.depth)
-        return x.permute(0, 2, 1, 3)
-
-    def forward(self, v, k, q, mask):
-        batch_size = q.size(0)
-
-        q = self.wq(q)
-        k = self.wk(k)
-        v = self.wv(v)
-
-        q = self.split_heads(q, batch_size)
-        k = self.split_heads(k, batch_size)
-        v = self.split_heads(v, batch_size)
-
-        # Scaled Dot-Product Attention
-        matmul_qk = torch.matmul(q, k.transpose(-2, -1))
-        dk = torch.tensor(k.size(-1), dtype=torch.float32)
-        scaled_attention_logits = matmul_qk / torch.sqrt(dk)
-
-        if mask is not None:
-            scaled_attention_logits += mask * -1e9
-
-        attention_weights = F.softmax(scaled_attention_logits, dim=-1)
-        output = torch.matmul(attention_weights, v)
-
-        output = output.permute(0, 2, 1, 3).contiguous()
-        output = output.view(batch_size, -1, self.d_model)
-
-        return self.dense(output), attention_weights
-
-
-class PointWiseFeedForwardNetwork(nn.Module):
-    def __init__(self, d_model, dff):
-        super(PointWiseFeedForwardNetwork, self).__init__()
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, dff), nn.ReLU(), nn.Linear(dff, d_model)
-        )
-
-    def forward(self, x):
-        return self.ffn(x)
-
-
-class EncoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dff, rate=0.1):
-        super(EncoderLayer, self).__init__()
-        self.mha = MultiHeadAttention(d_model, num_heads)
-        self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.dropout1 = nn.Dropout(rate)
-        self.dropout2 = nn.Dropout(rate)
-
-    def forward(self, x, mask):
-        # Pre-LN
-        x_norm = self.layernorm1(x)
-        attn_output, _ = self.mha(x_norm, x_norm, x_norm, mask)
-        out1 = x + self.dropout1(attn_output)
-
-        out1_norm = self.layernorm2(out1)
-        ffn_output = self.ffn(out1_norm)
-        out2 = out1 + self.dropout2(ffn_output)
-
-        return out2
-
-
-class DecoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dff, rate=0.1):
-        super(DecoderLayer, self).__init__()
-        self.mha1 = MultiHeadAttention(d_model, num_heads)
-        self.mha2 = MultiHeadAttention(d_model, num_heads)
-        self.ffn = PointWiseFeedForwardNetwork(d_model, dff)
-        self.layernorm1 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm2 = nn.LayerNorm(d_model, eps=1e-6)
-        self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
-        self.dropout1 = nn.Dropout(rate)
-        self.dropout2 = nn.Dropout(rate)
-        self.dropout3 = nn.Dropout(rate)
-
-    def forward(self, x, enc_output, look_ahead_mask, padding_mask):
-        x_norm = self.layernorm1(x)
-        attn1, attn_weights_block1 = self.mha1(x_norm, x_norm, x_norm, look_ahead_mask)
-        out1 = x + self.dropout1(attn1)
-
-        out1_norm = self.layernorm2(out1)
-        attn2, attn_weights_block2 = self.mha2(
-            enc_output, enc_output, out1_norm, padding_mask
-        )
-        out2 = out1 + self.dropout2(attn2)
-
-        out2_norm = self.layernorm3(out2)
-        ffn_output = self.ffn(out2_norm)
-        out3 = out2 + self.dropout3(ffn_output)
-
-        return out3, attn_weights_block1, attn_weights_block2
-
-
-def positional_encoding(position, d_model):
-    angle_rads = np.arange(position)[:, np.newaxis] / np.power(
-        10000, (2 * (np.arange(d_model)[np.newaxis, :] // 2)) / np.float32(d_model)
-    )
-    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-    pos_encoding = torch.from_numpy(angle_rads[np.newaxis, ...]).float()
-    return pos_encoding
-
-
-class Encoder(nn.Module):
-    def __init__(
-        self, num_layers, d_model, num_heads, dff, maximum_position_encoding, rate=0.1
-    ):
-        super(Encoder, self).__init__()
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.pos_encoding = positional_encoding(maximum_position_encoding, self.d_model)
-        self.enc_layers = nn.ModuleList(
-            [EncoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
-        )
-        self.dropout = nn.Dropout(rate)
-
-    def forward(self, x, mask):
-        seq_len = x.size(1)
-        x += self.pos_encoding[:, :seq_len, :].to(x.device)
-        # x = self.dropout(x)
-        for i in range(self.num_layers):
-            x = self.enc_layers[i](x, mask)
-        return x
-
-
-class Decoder(nn.Module):
-    def __init__(
-        self, num_layers, d_model, num_heads, dff, maximum_position_encoding, rate=0.1
-    ):
-        super(Decoder, self).__init__()
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.pos_encoding = positional_encoding(maximum_position_encoding, d_model)
-        self.dec_layers = nn.ModuleList(
-            [DecoderLayer(d_model, num_heads, dff, rate) for _ in range(num_layers)]
-        )
-        self.dropout = nn.Dropout(rate)
-
-    def forward(self, x, enc_output, look_ahead_mask, padding_mask):
-        seq_len = x.size(1)
-        attention_weights = {}
-        x += self.pos_encoding[:, :seq_len, :].to(x.device)
-        # x = self.dropout(x)
-        for i in range(self.num_layers):
-            x, block1, block2 = self.dec_layers[i](
-                x, enc_output, look_ahead_mask, padding_mask
+        # 隨機丟棄 strokes
+        if nb_stroke > 3 and random.random() < 0.5:
+            img_raw, glabel_raw, nb_stroke = self._random_discard_strokes(
+                img_raw, glabel_raw, nb_stroke, nb_gp
             )
-            attention_weights[f"decoder_layer{i+1}_block1"] = block1
-            attention_weights[f"decoder_layer{i+1}_block2"] = block2
-        return x, attention_weights
+
+        img_np = img_raw.numpy()
+        H, W, S = img_np.shape
+
+        # --- 關鍵修正：使用 ReplayCompose 確保所有筆劃應用相同變換 ---
+        augmented_strokes = []
+        replay_data = None
+
+        for s in range(S):
+            stroke_img = img_np[:, :, s]
+
+            if np.sum(stroke_img) > 0:
+                if replay_data is None:
+                    # 對第一個有效筆劃應用增強，並儲存變換參數
+                    data = self.geometric_augmentation(image=stroke_img)
+                    augmented_stroke = data["image"]
+                    replay_data = data["replay"]
+                else:
+                    # 對後續筆劃應用完全相同的變換
+                    data = self.geometric_augmentation.replay(
+                        replay_data, image=stroke_img
+                    )
+                    augmented_stroke = data["image"]
+            else:
+                augmented_stroke = stroke_img
+
+            augmented_strokes.append(augmented_stroke)
+
+        augmented_img = np.stack(augmented_strokes, axis=-1)
+
+        return torch.from_numpy(augmented_img), glabel_raw, nb_stroke, nb_gp
+
+    def _random_discard_strokes(self, img_raw, glabel_raw, nb_stroke, nb_gp):
+        if nb_stroke <= 1:
+            return img_raw, glabel_raw, nb_stroke
+
+        drop_ratio = random.uniform(0.1, 0.3)
+        drop_count = max(1, int(nb_stroke * drop_ratio))
+
+        if drop_count >= nb_stroke:
+            return img_raw, glabel_raw, nb_stroke
+
+        valid_indices = [
+            i
+            for i in range(min(nb_stroke, img_raw.shape[2]))
+            if torch.any(img_raw[:, :, i] > 0)
+        ]
+        if len(valid_indices) <= drop_count:
+            return img_raw, glabel_raw, nb_stroke
+
+        drop_indices = random.sample(valid_indices, drop_count)
+        new_img_raw = img_raw.clone()
+        new_glabel_raw = glabel_raw.clone()
+
+        for idx in drop_indices:
+            new_img_raw[:, :, idx] = 0
+            new_glabel_raw[:, idx] = 0
+
+        new_nb_stroke = int(torch.sum(torch.any(new_img_raw > 0, dim=(0, 1))))
+        return new_img_raw, new_glabel_raw, new_nb_stroke
 
 
-class Discriminator(nn.Module):
-    def __init__(self, d_model):
-        super(Discriminator, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(d_model, 1024), nn.Linear(1024, 512), nn.Linear(512, d_model)
+class AeDataset(Dataset):
+    """用於 Autoencoder 訓練的 PyTorch Dataset。"""
+
+    def __init__(self, data_dir, raw_size, prefix, augment=False):
+        super().__init__()
+        self.raw_size = raw_size
+        self.augment = augment
+        self.stroke_aug = StrokeAugmentation(
+            apply_prob=0.5 if augment else 0.0, img_size=raw_size[0]
+        )
+        subset_path = os.path.join(data_dir, prefix)
+
+        if not os.path.isdir(subset_path):
+            raise FileNotFoundError(f"找不到資料夾: {subset_path}。")
+
+        self.file_list = [
+            os.path.join(subset_path, f)
+            for f in os.listdir(subset_path)
+            if f.endswith(".pt")
+        ]
+        loader_logger.info(f"從 {subset_path} 載入 {len(self.file_list)} 個檔案。")
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, index):
+        data = torch.load(self.file_list[index])
+        input_raw = (
+            data["img_raw"].view(self.raw_size[0], self.raw_size[1]).unsqueeze(0)
+        )
+        input_dis = (
+            data["edis_raw"].view(self.raw_size[0], self.raw_size[1]).unsqueeze(0)
         )
 
-    def forward(self, enc_output, dec_output):
-        x = self.network(dec_output)
-        # 矩陣點積: [N, nb_s, d_model] * [N, nb_g, d_model] -> [N, nb_g, nb_s]
-        output = torch.einsum("bsd,bgd->bgs", enc_output, x)
-        return output
+        # --- 已修正：使用 ReplayCompose 確保變換一致 ---
+        if self.augment and random.random() < self.stroke_aug.apply_prob:
+            input_raw_np = input_raw.squeeze(0).numpy()
+            input_dis_np = input_dis.squeeze(0).numpy()
+
+            # 第一次應用，獲取增強後的圖像和 replay data
+            data_raw = self.stroke_aug.augmentation_pipeline(image=input_raw_np)
+            aug_input_raw = data_raw["image"]
+            replay_data = data_raw["replay"]
+
+            # 第二次應用，使用 replay data 來應用完全相同的變換
+            data_dis = self.stroke_aug.augmentation_pipeline.replay(
+                replay_data, image=input_dis_np
+            )
+            aug_input_dis = data_dis["image"]
+
+            # 轉回 tensor
+            input_raw = torch.from_numpy(aug_input_raw).unsqueeze(0)
+            input_dis = torch.from_numpy(aug_input_dis).unsqueeze(0)
+
+        return input_raw, input_dis
 
 
-class GpTransformer(nn.Module):
-    def __init__(
-        self, num_layers, d_model, num_heads, dff, pe_input, pe_target, rate=0.1
-    ):
-        super(GpTransformer, self).__init__()
-        self.encoder = Encoder(num_layers, d_model, num_heads, dff, pe_input, rate)
-        self.decoder = Decoder(num_layers, d_model, num_heads, dff, pe_target, rate)
-        self.disc_layer = Discriminator(d_model)
-        self.layernorm = nn.LayerNorm(d_model, eps=1e-6)
-        self.seqspa_fusion = SeqSpaFusion(d_model=d_model)
-    def forward(self, inp, adj_matrix, mask, tar, enc_padding_mask, look_ahead_mask, dec_padding_mask):
-        inp = self.seqspa_fusion(inp, adj_matrix, mask)
-        enc_output = self.encoder(inp, enc_padding_mask)
-        dec_output, attention_weights = self.decoder(
-            tar, enc_output, look_ahead_mask, dec_padding_mask
+class GPRegDataset(Dataset):
+    """用於 Transformer 分割模型訓練的 PyTorch Dataset。"""
+
+    def __init__(self, data_dir, raw_size, prefix, augment=False):
+        super().__init__()
+        self.raw_size = raw_size
+        self.augment = augment
+        self.prefix = prefix
+        self.sketch_aug = SketchAugmentation(
+            apply_prob=0.5 if augment else 0.0, img_size=raw_size[0]
         )
-        dec_output = self.layernorm(dec_output)
-        final_output = self.disc_layer(enc_output, dec_output)
-        return final_output, attention_weights
+        subset_path = os.path.join(data_dir, prefix)
+
+        if not os.path.isdir(subset_path):
+            raise FileNotFoundError(f"找不到資料夾: {subset_path}。")
+
+        self.file_list = [
+            os.path.join(subset_path, f)
+            for f in os.listdir(subset_path)
+            if f.endswith(".pt")
+        ]
+        loader_logger.info(f"從 {subset_path} 載入 {len(self.file_list)} 個檔案。")
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, index):
+        data = torch.load(self.file_list[index])
+        img_raw = data["img_raw"]
+        glabel_raw = data["glabel_raw"]
+
+        #if self.prefix == "train" and glabel_raw.shape[0] > 1:
+        #    stroke_counts_per_group = torch.sum(glabel_raw, dim=1)
+        #    sorted_indices = torch.argsort(stroke_counts_per_group, descending=True)
+        #    glabel_raw = glabel_raw[sorted_indices]
+        #    if "part_names" in data:
+        #        part_names = data["part_names"]
+        #        data["part_names"] = [part_names[i] for i in sorted_indices]
+
+        nb_stroke = img_raw.shape[2]
+        nb_gps = glabel_raw.shape[0]
+
+        if self.augment:
+            img_raw, glabel_raw, nb_stroke, nb_gps = self.sketch_aug(
+                (img_raw, glabel_raw, nb_stroke, nb_gps)
+            )
+
+        return img_raw, glabel_raw, int(nb_stroke), int(nb_gps)
+
+
+def gpreg_collate_fn(batch):
+    """用於 GPRegDataset 的自定義 collate_fn。"""
+    imgs, glabels, nb_strokes, nb_gps = zip(*batch)
+    max_strokes = max(s.shape[2] for s in imgs)
+    max_gps = max(g.shape[0] for g in glabels)
+    padded_imgs, padded_glabels = [], []
+    stroke_padding_value = -2.0
+    label_padding_value = -1
+
+    for img, glabel in zip(imgs, glabels):
+        pad_strokes_img = max_strokes - img.shape[2]
+        padded_img = F.pad(
+            img, (0, pad_strokes_img, 0, 0, 0, 0), "constant", stroke_padding_value
+        )
+        padded_imgs.append(padded_img)
+
+        pad_gps_label = max_gps - glabel.shape[0]
+        pad_strokes_label = max_strokes - glabel.shape[1]
+        padded_glabel = F.pad(
+            glabel,
+            (0, pad_strokes_label, 0, pad_gps_label),
+            "constant",
+            label_padding_value,
+        )
+        padded_glabels.append(padded_glabel)
+
+    return (
+        torch.stack(padded_imgs),
+        torch.stack(padded_glabels),
+        torch.tensor(nb_strokes, dtype=torch.int32),
+        torch.tensor(nb_gps, dtype=torch.int32),
+    )
