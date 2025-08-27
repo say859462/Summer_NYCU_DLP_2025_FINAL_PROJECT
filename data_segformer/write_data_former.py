@@ -6,7 +6,7 @@ import torch
 import random
 
 # --- 1. 設定 ---
-input_file_path = r"SPG\\Perceptual Grouping\\airplane.ndjson"
+input_file_path = r"SPG\\Perceptual Grouping\\calculator.ndjson"
 output_dir = "data_former_pt"
 os.makedirs(output_dir, exist_ok=True)
 train_dir = os.path.join(output_dir, "train")

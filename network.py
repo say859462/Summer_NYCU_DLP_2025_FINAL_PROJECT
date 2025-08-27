@@ -4,13 +4,14 @@ import torch.nn.functional as F
 import math
 import numpy as np
 
+
 #!! 可能可以加resnet在GCN
-#iou in gnc可以調
-#enhanced features
+# iou in gnc可以調
+# enhanced features
 def build_overlap_graph(stroke_images, iou_thresh=0.1):
     """
     Build adjacency matrix based on bounding box IoU of strokes.
-    
+
     stroke_images: (N, H, W) binary masks for each stroke
     returns: (N, N) adjacency matrix (0/1)
     """
@@ -21,7 +22,7 @@ def build_overlap_graph(stroke_images, iou_thresh=0.1):
     for i in range(N):
         ys, xs = torch.where(stroke_images[i] > 0)
         if len(xs) == 0 or len(ys) == 0:
-            boxes.append((0,0,0,0))  # empty stroke
+            boxes.append((0, 0, 0, 0))  # empty stroke
         else:
             x_min, x_max = xs.min().item(), xs.max().item()
             y_min, y_max = ys.min().item(), ys.max().item()
@@ -39,7 +40,9 @@ def build_overlap_graph(stroke_images, iou_thresh=0.1):
             # intersection
             inter_x1, inter_y1 = max(xi1, xj1), max(yi1, yj1)
             inter_x2, inter_y2 = min(xi2, xj2), min(yi2, yj2)
-            inter_area = max(0, inter_x2 - inter_x1 + 1) * max(0, inter_y2 - inter_y1 + 1)
+            inter_area = max(0, inter_x2 - inter_x1 + 1) * max(
+                0, inter_y2 - inter_y1 + 1
+            )
 
             # union
             area_i = (xi2 - xi1 + 1) * (yi2 - yi1 + 1)
@@ -67,7 +70,14 @@ class SeqSpaFusion(nn.Module):
         enhanced_embeds: (B, N, D_out)
     """
 
-    def __init__(self, d_model=256, hidden_size=128, gcn_hidden=128, out_dim=256, num_gcn_layers=2):
+    def __init__(
+        self,
+        d_model=256,
+        hidden_size=128,
+        gcn_hidden=128,
+        out_dim=256,
+        num_gcn_layers=2,
+    ):
         super(SeqSpaFusion, self).__init__()
 
         # Sequential Encoder (BiLSTM)
@@ -75,37 +85,38 @@ class SeqSpaFusion(nn.Module):
             input_size=d_model,
             hidden_size=hidden_size,
             bidirectional=True,
-            batch_first=True
+            batch_first=True,
         )
         self.seq_proj = nn.Linear(hidden_size * 2, d_model)
 
         # Spatial Encoder (GCN)
-        self.gcn_layers = nn.ModuleList([
-            nn.Linear(d_model if i == 0 else gcn_hidden, gcn_hidden)
-            for i in range(num_gcn_layers)
-        ])
+        self.gcn_layers = nn.ModuleList(
+            [
+                nn.Linear(d_model if i == 0 else gcn_hidden, gcn_hidden)
+                for i in range(num_gcn_layers)
+            ]
+        )
         self.gcn_proj = nn.Linear(gcn_hidden, d_model)
 
         # Fusion MLP
         fusion_in_dim = d_model * 3  # original + seq + spa
         self.mlp = nn.Sequential(
-            nn.Linear(fusion_in_dim, out_dim),
-            nn.ReLU(),
-            nn.Linear(out_dim, out_dim)
+            nn.Linear(fusion_in_dim, out_dim), nn.ReLU(), nn.Linear(out_dim, out_dim)
         )
-        
 
-    def forward(self, stroke_embeds, adj_matrix, mask = None):
+    def forward(self, stroke_embeds, adj_matrix, mask=None):
         B, N, D = stroke_embeds.shape
 
         # Sequential encoding (temporal order preserved)
-        seq_out, _ = self.lstm(stroke_embeds)   # (B, N, 2*hidden)
-        seq_feat = self.seq_proj(seq_out)       # (B, N, D)
+        seq_out, _ = self.lstm(stroke_embeds)  # (B, N, 2*hidden)
+        seq_feat = self.seq_proj(seq_out)  # (B, N, D)
 
         # Spatial encoding (message passing using adjacency)
         spa_feat = stroke_embeds
         for idx, layer in enumerate(self.gcn_layers):
-            agg = torch.bmm(adj_matrix, spa_feat) / (adj_matrix.sum(-1, keepdim=True) + 1e-6)
+            agg = torch.bmm(adj_matrix, spa_feat) / (
+                adj_matrix.sum(-1, keepdim=True) + 1e-6
+            )
             new_feat = layer(agg)
 
             # residual connection
@@ -115,11 +126,11 @@ class SeqSpaFusion(nn.Module):
                 spa_feat = F.relu(new_feat)
 
         # 🔹 always project back to d_model
-        spa_feat = self.gcn_proj(spa_feat)   # (B, N, 256)
+        spa_feat = self.gcn_proj(spa_feat)  # (B, N, 256)
 
         # Fusion
         fused = torch.cat([stroke_embeds, seq_feat, spa_feat], dim=-1)  # (B, N, 3D)
-        enhanced = self.mlp(fused)                                      # (B, N, D_out)
+        enhanced = self.mlp(fused)  # (B, N, D_out)
         if mask is not None:
             enhanced = enhanced * mask.unsqueeze(-1).float()
         return enhanced
@@ -331,7 +342,7 @@ class MultiHeadAttention(nn.Module):
 
         # Scaled Dot-Product Attention
         matmul_qk = torch.matmul(q, k.transpose(-2, -1))
-        dk = torch.tensor(k.size(-1), dtype=torch.float32)
+        dk = torch.tensor(k.size(-1), dtype=torch.float32, device=q.device)
         scaled_attention_logits = matmul_qk / torch.sqrt(dk)
 
         if mask is not None:
@@ -391,7 +402,6 @@ class DecoderLayer(nn.Module):
         self.layernorm3 = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
-        
 
     def forward(self, x, enc_output, look_ahead_mask, padding_mask):
         x_norm = self.layernorm1(x)
@@ -506,7 +516,7 @@ class GpTransformer(nn.Module):
         dec_padding_mask,
     ):
         inp = self.seqspa_fusion(inp, adj_matrix, mask)
-        
+
         enc_output = self.encoder(inp, enc_padding_mask)
         dec_output, attention_weights = self.decoder(
             tar, enc_output, look_ahead_mask, dec_padding_mask
