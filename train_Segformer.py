@@ -656,14 +656,16 @@ def train_net():
 
         if step > 0 and step % hyper_params["exeValStep"] == 0:
             val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
+            val_gacc = 0
             test_iter = iter(test_loader)
             while True:
                 try:
                     batch_data_val = next(test_iter)
-                    loss_v, _, sacc_v, cacc_v, final_predictions_val = (
+                    loss_v, gacc_v, sacc_v, cacc_v, final_predictions_val = (
                         test_autoregre_step(batch_data_val)
                     )
                     val_loss += loss_v.item()
+                    val_gacc += gacc_v.item()
                     val_sacc += sacc_v.item()
                     val_cacc += cacc_v
                     if count < 3:
@@ -712,19 +714,21 @@ def train_net():
                     count += 1
                 except StopIteration:
                     break
-            avg_loss, avg_sacc, avg_cacc = (
+            avg_loss, avg_gacc, avg_sacc, avg_cacc = (
                 val_loss / count,
+                val_gacc / count,
                 val_sacc / count,
                 val_cacc / count,
             )
             logger.info(
-                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
+                f"--- 驗證步驟 {step} --- 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 GAcc: {avg_gacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
             )
             writer.add_scalar("Loss/validation", avg_loss, step)
             writer.add_scalar("SAcc/validation", avg_sacc, step)
+            writer.add_scalar("GAcc/validation", avg_gacc, step)
             writer.add_scalar("CAcc/validation", avg_cacc, step)
 
-            current_score_sum = avg_sacc + avg_cacc
+            current_score_sum = avg_sacc + avg_cacc + avg_gacc
 
             # 將當前的驗證分數傳給 scheduler
             scheduler.step(current_score_sum)
@@ -778,20 +782,22 @@ def test_net():
     img_folder = os.path.join(output_folder, "imgs")
     os.makedirs(img_folder, exist_ok=True)
     val_loss, val_sacc, val_cacc, count = 0, 0, 0, 0
+    val_gacc = 0
     test_iter = iter(test_loader)
     test_itr = 1
     while True:
         try:
             batch_data = next(test_iter)
-            loss_v, _, sacc_v, cacc_v, final_predictions = test_autoregre_step(
+            loss_v, gacc_v, sacc_v, cacc_v, final_predictions = test_autoregre_step(
                 batch_data
             )
             val_loss += loss_v.item()
+            val_gacc += gacc_v.item()
             val_sacc += sacc_v.item()
             val_cacc += cacc_v
             count += 1
             logger.info(
-                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.6f}, CAcc: {cacc_v:.6f}"
+                f"測試樣本 {test_itr}, SAcc: {sacc_v.item():.6f}, GAcc: {gacc_v.item():.6f}, CAcc: {cacc_v:.6f}"
             )
             input_raw, glabel_raw, nb_strokes, _ = batch_data
             gt_vis_img = generate_grouped_image(
@@ -811,9 +817,9 @@ def test_net():
             test_itr += 1
         except StopIteration:
             break
-    avg_loss, avg_sacc, avg_cacc = val_loss / count, val_sacc / count, val_cacc / count
+    avg_loss, avg_sacc, avg_gacc, avg_cacc = val_loss / count, val_sacc / count, val_gacc / count, val_cacc / count
     logger.info(
-        f"測試完成 - 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
+        f"測試完成 - 平均損失: {avg_loss:.6f}, 平均 SAcc: {avg_sacc:.6f}, 平均 GAcc: {avg_gacc:.6f}, 平均 CAcc: {avg_cacc:.6f}"
     )
 
 
