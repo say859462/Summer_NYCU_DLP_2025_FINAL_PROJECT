@@ -17,7 +17,7 @@ import numpy as np
 import cv2
 from PIL import Image
 
-# 從您提供的 PyTorch 檔案中匯入模듈
+
 from loader import GPRegDataset, gpreg_collate_fn
 from network import GpTransformer, AutoencoderEmbed
 
@@ -131,10 +131,10 @@ def loss_fn(real, pred, gamma=2.0):
     計算 Focal Loss。
     根據論文 Eq. 6，gamma 值預設為 2.0。
     """
-    # 步驟 1: 建立遮罩 (mask)，忽略填充值 (-1.0)，這部分與原始程式碼相同
+    # 步驟 1: 建立遮罩 (mask)，忽略填充值 (-1.0)
     mask = (real != -1.0).float()
 
-    # 步驟 2: 計算標準的 BCE Loss (但不進行 reduction)
+    # 步驟 2: 計算標準的 BCE Loss (不進行 reduction)
     # F.binary_cross_entropy_with_logits 包含了 sigmoid 操作，更穩定
     bce_loss = F.binary_cross_entropy_with_logits(pred, real.float(), reduction="none")
 
@@ -478,7 +478,7 @@ def train_net():
     logger.info("--- 開始訓練 ---")
     writer = SummaryWriter(log_dir=os.path.join(output_folder, "summary"))
 
-    # ====== NEW: 建立用於儲存驗證過程圖片的資料夾 ======
+    # ====== 建立用於儲存驗證過程圖片的資料夾 ======
     val_img_folder = os.path.join(output_folder, "validation_imgs")
     os.makedirs(val_img_folder, exist_ok=True)
 
