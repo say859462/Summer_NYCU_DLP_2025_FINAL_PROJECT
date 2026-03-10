@@ -8,7 +8,7 @@ import random
 import numpy as np
 from PIL import Image
 
-# --- 關鍵修正：確保匯入 ReplayCompose ---
+
 from albumentations.core.composition import ReplayCompose
 
 loader_logger = logging.getLogger("main.loader")
@@ -77,7 +77,7 @@ class SketchAugmentation:
         img_np = img_raw.numpy()
         H, W, S = img_np.shape
 
-        # --- 關鍵修正：使用 ReplayCompose 確保所有筆劃應用相同變換 ---
+        # --- 使用 ReplayCompose 確保所有筆劃應用相同變換 ---
         augmented_strokes = []
         replay_data = None
 
@@ -169,7 +169,7 @@ class AeDataset(Dataset):
             data["edis_raw"].view(self.raw_size[0], self.raw_size[1]).unsqueeze(0)
         )
 
-        # --- 已修正：使用 ReplayCompose 確保變換一致 ---
+        # ---使用 ReplayCompose 確保變換一致 ---
         if self.augment and random.random() < self.stroke_aug.apply_prob:
             input_raw_np = input_raw.squeeze(0).numpy()
             input_dis_np = input_dis.squeeze(0).numpy()
