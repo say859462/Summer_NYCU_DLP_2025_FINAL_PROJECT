@@ -10,7 +10,7 @@ from tqdm import tqdm
 import gc
 
 
-# --- 工具函式（保持完全一致）---
+# --- 工具函式 ---
 def get_bounds(data, factor=1):
     min_x = min_y = max_x = max_y = 0
     abs_x = abs_y = 0
